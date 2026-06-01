@@ -71,6 +71,27 @@ impl CdnSource {
             ),
         }
     }
+
+    /// Build a HuggingFace URL for a csukuangfj sherpa-onnx Parakeet INT8 model file.
+    ///
+    /// Repo: `csukuangfj/sherpa-onnx-nemo-<model_id>-int8`
+    fn huggingface_parakeet(model_id: &str, filename: &str) -> Self {
+        let repo = format!("sherpa-onnx-nemo-{model_id}-int8");
+        Self {
+            name: "huggingface",
+            url: format!("https://huggingface.co/csukuangfj/{repo}/resolve/main/{filename}"),
+        }
+    }
+
+    /// Build a hf-mirror.com URL (China-friendly HuggingFace mirror) for the Parakeet model.
+    /// ModelScope does not host this model; hf-mirror.com serves as the China fallback.
+    fn modelscope_parakeet(model_id: &str, filename: &str) -> Self {
+        let repo = format!("sherpa-onnx-nemo-{model_id}-int8");
+        Self {
+            name: "hf-mirror",
+            url: format!("https://hf-mirror.com/csukuangfj/{repo}/resolve/main/{filename}"),
+        }
+    }
 }
 
 // ─── CDN 测速 ──────────────────────────────────────────────────────────────────
@@ -106,9 +127,18 @@ async fn measure_latency(client: &Client, cdn: &CdnSource) -> Result<(&'static s
 /// - 两者均可达 → 选延迟低者
 /// - 一方超时/失败 → 选另一方
 /// - 两者均失败 → 回退到 HuggingFace（国际通用）
-async fn select_fastest_cdn(client: &Client, filename: &str) -> CdnSource {
-    let hf = CdnSource::huggingface(filename);
-    let ms = CdnSource::modelscope(filename);
+async fn select_fastest_cdn(client: &Client, model_id: &str, filename: &str) -> CdnSource {
+    let (hf, ms) = if model_id.starts_with("parakeet") {
+        (
+            CdnSource::huggingface_parakeet(model_id, filename),
+            CdnSource::modelscope_parakeet(model_id, filename),
+        )
+    } else {
+        (
+            CdnSource::huggingface(filename),
+            CdnSource::modelscope(filename),
+        )
+    };
 
     // 并发发起两个 HEAD 请求
     let (hf_result, ms_result) =
@@ -125,22 +155,78 @@ async fn select_fastest_cdn(client: &Client, filename: &str) -> CdnSource {
         (Ok((_, hf_ms)), Ok((_, ms_ms))) => {
             if ms_ms < hf_ms {
                 tracing::info!("ModelScope faster ({ms_ms}ms < {hf_ms}ms), using ModelScope");
-                CdnSource::modelscope(filename)
+                if model_id.starts_with("parakeet") { CdnSource::modelscope_parakeet(model_id, filename) } else { CdnSource::modelscope(filename) }
             } else {
                 tracing::info!("HuggingFace faster ({hf_ms}ms <= {ms_ms}ms), using HuggingFace");
-                CdnSource::huggingface(filename)
+                if model_id.starts_with("parakeet") { CdnSource::huggingface_parakeet(model_id, filename) } else { CdnSource::huggingface(filename) }
             }
         }
         // HuggingFace 失败 → 用 ModelScope
         (Err(e), Ok(_)) => {
             tracing::warn!("HuggingFace unreachable ({e}), falling back to ModelScope");
-            CdnSource::modelscope(filename)
+            if model_id.starts_with("parakeet") { CdnSource::modelscope_parakeet(model_id, filename) } else { CdnSource::modelscope(filename) }
         }
         // ModelScope 失败或两者均失败 → 用 HuggingFace
         (Ok(_), Err(_)) | (Err(_), Err(_)) => {
             tracing::warn!("ModelScope unreachable, using HuggingFace");
-            CdnSource::huggingface(filename)
+            if model_id.starts_with("parakeet") { CdnSource::huggingface_parakeet(model_id, filename) } else { CdnSource::huggingface(filename) }
         }
+    }
+}
+
+// ─── Parakeet 吞吐量测速 ───────────────────────────────────────────────────────
+
+/// Measure actual download throughput by fetching the first 256 KB of a URL
+/// via an HTTP Range request. Returns bytes per second, or 0 on any error.
+async fn measure_throughput_bps(client: &Client, url: &str) -> u64 {
+    let start = Instant::now();
+    let result = client
+        .get(url)
+        .header("Range", "bytes=0-262143") // 256 KB probe
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await;
+
+    match result {
+        Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 206 => {
+            match resp.bytes().await {
+                Ok(bytes) if !bytes.is_empty() => {
+                    let elapsed = start.elapsed().as_secs_f64().max(f64::EPSILON);
+                    (bytes.len() as f64 / elapsed) as u64
+                }
+                _ => 0,
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// Select the best Parakeet CDN by concurrently downloading a 256 KB range probe
+/// from `encoder.int8.onnx` on both nodes and comparing real throughput.
+///
+/// Returns `true` when hf-mirror.com wins (better for mainland China),
+/// `false` when HuggingFace wins.
+async fn select_parakeet_cdn_by_throughput(client: &Client, model_id: &str) -> bool {
+    let hf_url = CdnSource::huggingface_parakeet(model_id, "encoder.int8.onnx").url;
+    let hfm_url = CdnSource::modelscope_parakeet(model_id, "encoder.int8.onnx").url;
+
+    let (hf_bps, hfm_bps) = tokio::join!(
+        measure_throughput_bps(client, &hf_url),
+        measure_throughput_bps(client, &hfm_url),
+    );
+
+    tracing::info!(
+        "Parakeet CDN throughput — HuggingFace: {} KB/s, hf-mirror: {} KB/s",
+        hf_bps / 1024,
+        hfm_bps / 1024
+    );
+
+    if hfm_bps > hf_bps {
+        tracing::info!("hf-mirror faster, using hf-mirror for all Parakeet files");
+        true
+    } else {
+        tracing::info!("HuggingFace faster or both failed, using HuggingFace for all Parakeet files");
+        false
     }
 }
 
@@ -151,7 +237,7 @@ async fn select_fastest_cdn(client: &Client, filename: &str) -> CdnSource {
 /// - macOS: `~/Library/Application Support/<bundle_id>/models/`
 /// - Windows: `%APPDATA%\<bundle_id>\models\`
 /// - Linux: `~/.local/share/<bundle_id>/models/`
-fn get_model_dir(app: &AppHandle) -> Result<std::path::PathBuf> {
+pub(crate) fn get_model_dir(app: &AppHandle) -> Result<std::path::PathBuf> {
     let data_dir = app
         .path()
         .app_data_dir()
@@ -159,60 +245,200 @@ fn get_model_dir(app: &AppHandle) -> Result<std::path::PathBuf> {
     Ok(data_dir.join("models"))
 }
 
-/// 根据模型 ID 构造 ggml bin 文件名，例如 `"large-v3-turbo"` → `"ggml-large-v3-turbo.bin"`。
-fn model_filename(model_id: &str) -> String {
+/// Build the local filename for a Whisper ggml model.
+/// e.g. `"large-v3-turbo"` → `"ggml-large-v3-turbo.bin"`
+pub(crate) fn model_filename(model_id: &str) -> String {
     format!("ggml-{model_id}.bin")
+}
+
+/// Return the local path for a Whisper ggml model file (may not exist yet).
+pub(crate) fn get_model_path(app: &AppHandle, model_id: &str) -> Result<std::path::PathBuf> {
+    Ok(get_model_dir(app)?.join(model_filename(model_id)))
+}
+
+/// Return the local subdirectory for a Parakeet ONNX model bundle.
+/// e.g. `<app_data>/models/parakeet-tdt-0.6b-v3/`
+pub(crate) fn get_parakeet_dir(
+    app: &AppHandle,
+    model_id: &str,
+) -> Result<std::path::PathBuf> {
+    Ok(get_model_dir(app)?.join(model_id))
 }
 
 // ─── Tauri 命令 ────────────────────────────────────────────────────────────────
 
-/// **检测本地模型是否存在**
+/// **检测本地模型是否就绪**
 ///
-/// 前端在模型下拉菜单切换时调用，用于决定显示"开始提取"还是"下载模型"按钮。
-///
-/// # 参数
-/// - `model_id`: 模型短名，例如 `"tiny"` / `"base"` / `"medium"` / `"large-v3-turbo"`
-///
-/// # 返回
-/// - `true`：本地已有该模型文件
-/// - `false`：文件不存在，需要下载
+/// - Whisper：检查 `ggml-<id>.bin` 是否存在
+/// - Parakeet：检查子目录内 4 个 ONNX 文件是否全部存在
 #[tauri::command]
 pub async fn check_model_status(app: AppHandle, model_id: String) -> Result<bool, String> {
-    let model_path = get_model_dir(&app)
-        .map_err(|e| e.to_string())?
-        .join(model_filename(&model_id));
-
-    Ok(model_path.exists())
+    if model_id.starts_with("parakeet") {
+        use super::sherpa_runner::parakeet_model_ready;
+        Ok(parakeet_model_ready(&app, &model_id))
+    } else {
+        let model_path = get_model_dir(&app)
+            .map_err(|e| e.to_string())?
+            .join(model_filename(&model_id));
+        Ok(model_path.exists())
+    }
 }
 
-/// **下载指定 Whisper 模型**
+/// **下载指定模型**
 ///
-/// 执行流程：
-/// 1. 创建目标目录（如不存在）
-/// 2. 并发测速 HuggingFace / ModelScope，选最快 CDN
-/// 3. 发起 GET 请求，流式读取响应体
-/// 4. 每接收一个 chunk，立即写入本地文件，并通过 `model-download-progress` 事件推送进度
-/// 5. 写完后 flush，下载完成
+/// - **Whisper 模型**：单文件流式下载，持续推送 `model-download-progress` 事件。
+/// - **Parakeet 模型**：依次下载 4 个 ONNX 文件到 `<models>/<model_id>/` 子目录，
+///   使用全局累计字节推送合并进度，与 Whisper 路径行为一致。
 ///
 /// # 参数
-/// - `model_id`: 模型短名
-/// - `total_size`: 前端预估的文件总字节数（作为 Content-Length 缺失时的备用值）
-///
-/// # 错误
-/// 返回 `Err(String)` 时，前端应展示错误提示并允许重试。
+/// - `model_id`   : 模型短名（`"large-v3-turbo"` 或 `"parakeet-tdt-0.6b-v3"`）
+/// - `total_size` : 前端预估的总字节数，作为 Content-Length 缺失时的兜底值
 #[tauri::command]
 pub async fn download_model(
     app: AppHandle,
     model_id: String,
     total_size: u64,
 ) -> Result<(), String> {
+    if model_id.starts_with("parakeet") {
+        return download_parakeet_files(&app, &model_id, total_size).await;
+    }
+    download_whisper_file(&app, &model_id, total_size).await
+}
+
+// ─── Parakeet multi-file download ────────────────────────────────────────────
+
+/// Download the 4 Parakeet ONNX model files from k2-fsa HuggingFace / ModelScope.
+/// All files go to `<models_dir>/<model_id>/`.  Combined progress is emitted so
+/// the frontend progress bar works identically to the Whisper path.
+async fn download_parakeet_files(
+    app: &AppHandle,
+    model_id: &str,
+    total_size: u64,
+) -> Result<(), String> {
+    use super::sherpa_runner::PARAKEET_MODEL_FILES;
+
+    let dest_dir = get_parakeet_dir(app, model_id).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&dest_dir)
+        .await
+        .map_err(|e| format!("创建 Parakeet 模型目录失败: {e}"))?;
+
+    let client = Client::builder()
+        .user_agent("qafone-tools/1.0 (model-downloader)")
+        .build()
+        .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
+
+    // Per-file estimated sizes based on actual v3 INT8 model weights:
+    // encoder.int8.onnx ~652 MB (97.2%), decoder.int8.onnx ~11.8 MB (1.8%),
+    // joiner.int8.onnx ~6.36 MB (0.9%), tokens.txt ~93 kB (0.1%).
+    let est_sizes: [u64; 4] = [
+        (total_size as f64 * 0.972) as u64,
+        (total_size as f64 * 0.018) as u64,
+        (total_size as f64 * 0.009) as u64,
+        (total_size as f64 * 0.001) as u64,
+    ];
+
+    // Probe both CDNs concurrently with a 256 KB range request on the encoder
+    // to measure real throughput before committing to one node for all 4 files.
+    // HEAD-latency based selection is unreliable because HuggingFace Cloudflare
+    // edges respond quickly but LFS downloads can be throttled in mainland China.
+    let use_hf_mirror = select_parakeet_cdn_by_throughput(&client, model_id).await;
+    let chosen_cdn_label = if use_hf_mirror { "hf-mirror" } else { "huggingface" };
+    tracing::info!("Parakeet: all files will be fetched from {chosen_cdn_label}");
+
+    let mut global_downloaded: u64 = 0;
+    let download_start = Instant::now();
+
+    for (file_name, &est_size) in PARAKEET_MODEL_FILES.iter().zip(est_sizes.iter()) {
+        let cdn = if use_hf_mirror {
+            CdnSource::modelscope_parakeet(model_id, file_name) // hf-mirror.com
+        } else {
+            CdnSource::huggingface_parakeet(model_id, file_name)
+        };
+        let cdn_name = cdn.name.to_owned();
+        tracing::info!("Parakeet: downloading {file_name} from {cdn_name}");
+
+        let response = client
+            .get(&cdn.url)
+            .send()
+            .await
+            .map_err(|e| format!("请求 {file_name} 失败: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("下载 {file_name} 服务器返回错误（模型文件可能尚未发布）: {e}"))?;
+
+        let _file_total = response.content_length().unwrap_or(est_size);
+        let dest_path = dest_dir.join(file_name);
+
+        let mut out_file = fs::File::create(&dest_path)
+            .await
+            .map_err(|e| format!("创建文件 {dest_path:?} 失败: {e}"))?;
+
+        let mut stream = response.bytes_stream();
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk =
+                chunk_result.map_err(|e| format!("读取 {file_name} 数据流失败: {e}"))?;
+            out_file
+                .write_all(&chunk)
+                .await
+                .map_err(|e| format!("写入 {file_name} 失败: {e}"))?;
+
+            global_downloaded += chunk.len() as u64;
+            let elapsed = download_start.elapsed().as_secs_f64().max(f64::EPSILON);
+            let _ = app.emit(
+                "model-download-progress",
+                DownloadProgressPayload {
+                    model_id: model_id.to_string(),
+                    downloaded: global_downloaded,
+                    total: total_size,
+                    percentage: (global_downloaded as f64 / total_size as f64 * 100.0)
+                        .min(100.0),
+                    speed_bps: global_downloaded as f64 / elapsed,
+                    cdn_source: cdn_name.clone(),
+                },
+            );
+        }
+
+        out_file
+            .flush()
+            .await
+            .map_err(|e| format!("刷新 {file_name} 缓冲区失败: {e}"))?;
+
+        tracing::info!("Parakeet: {file_name} complete");
+    }
+
+    // Emit a definitive 100% completion event. The per-chunk events may have
+    // stopped at ~99.9% when actual file sizes are slightly less than total_size,
+    // leaving the frontend stuck at the download screen forever.
+    let final_elapsed = download_start.elapsed().as_secs_f64().max(f64::EPSILON);
+    let _ = app.emit(
+        "model-download-progress",
+        DownloadProgressPayload {
+            model_id: model_id.to_string(),
+            downloaded: total_size,
+            total: total_size,
+            percentage: 100.0,
+            speed_bps: global_downloaded as f64 / final_elapsed,
+            cdn_source: chosen_cdn_label.to_string(),
+        },
+    );
+
+    Ok(())
+}
+
+// ─── Whisper single-file download ────────────────────────────────────────────
+
+async fn download_whisper_file(
+    app: &AppHandle,
+    model_id: &str,
+    total_size: u64,
+) -> Result<(), String> {
     // ── 1. 准备目标路径 ────────────────────────────────────────────────────
-    let model_dir = get_model_dir(&app).map_err(|e| e.to_string())?;
+    let model_dir = get_model_dir(app).map_err(|e| e.to_string())?;
     fs::create_dir_all(&model_dir)
         .await
         .map_err(|e| format!("创建模型目录失败: {e}"))?;
 
-    let filename = model_filename(&model_id);
+    let filename = model_filename(model_id);
     let dest_path = model_dir.join(&filename);
 
     // ── 2. 构建 HTTP 客户端 ────────────────────────────────────────────────
@@ -222,8 +448,7 @@ pub async fn download_model(
         .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
 
     // ── 3. 并发测速，选最快 CDN ────────────────────────────────────────────
-    //      注意：前端已在 `downloadState.phase = 'speed-testing'` 时显示测速 UI
-    let cdn = select_fastest_cdn(&client, &filename).await;
+    let cdn = select_fastest_cdn(&client, model_id, &filename).await;
     let cdn_name = cdn.name.to_owned();
 
     tracing::info!("开始从 {cdn_name} 下载 {filename}");
@@ -235,7 +460,6 @@ pub async fn download_model(
         .await
         .map_err(|e| format!("请求 {cdn_name} 失败: {e}"))?;
 
-    // 优先使用服务器返回的 Content-Length，否则使用前端传入的估算值
     let content_length = response.content_length().unwrap_or(total_size);
 
     // ── 5. 打开目标文件（覆盖写入） ────────────────────────────────────────
@@ -251,26 +475,20 @@ pub async fn download_model(
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result.map_err(|e| format!("读取响应流失败: {e}"))?;
 
-        // 写入本地文件
         file.write_all(&chunk)
             .await
             .map_err(|e| format!("写入文件失败: {e}"))?;
 
         downloaded += chunk.len() as u64;
 
-        // 计算实时速度（避免除以 0）
         let elapsed_secs = download_start.elapsed().as_secs_f64().max(f64::EPSILON);
         let speed_bps = downloaded as f64 / elapsed_secs;
-
-        // 百分比（钳位到 100.0 防止 Content-Length 不准确时溢出）
         let percentage = (downloaded as f64 / content_length as f64 * 100.0).min(100.0);
 
-        // 通过 Tauri 事件将进度实时推送到前端
-        // 前端使用 `listen('model-download-progress', handler)` 接收
         let _ = app.emit(
             "model-download-progress",
             DownloadProgressPayload {
-                model_id: model_id.clone(),
+                model_id: model_id.to_string(),
                 downloaded,
                 total: content_length,
                 percentage,
@@ -287,4 +505,42 @@ pub async fn download_model(
 
     tracing::info!("{filename} 下载完成，共 {downloaded} 字节");
     Ok(())
+}
+
+/// **删除已下载的模型文件 / 目录**
+///
+/// - Whisper：删除单个 `ggml-*.bin` 文件（幂等）。
+/// - Parakeet：删除 `<model_id>/` 整个子目录（幂等）。
+#[tauri::command]
+pub async fn delete_model(app: AppHandle, model_id: String) -> Result<(), String> {
+    if model_id.starts_with("parakeet") {
+        let dir = get_parakeet_dir(&app, &model_id).map_err(|e| e.to_string())?;
+        if dir.exists() {
+            fs::remove_dir_all(&dir)
+                .await
+                .map_err(|e| format!("删除 Parakeet 模型目录失败: {e}"))?;
+            tracing::info!("已删除 Parakeet 模型目录: {:?}", dir);
+        }
+    } else {
+        let path = get_model_dir(&app)
+            .map_err(|e| e.to_string())?
+            .join(model_filename(&model_id));
+        if path.exists() {
+            fs::remove_file(&path)
+                .await
+                .map_err(|e| format!("删除模型文件失败: {e}"))?;
+            tracing::info!("已删除模型文件: {:?}", path);
+        }
+    }
+    Ok(())
+}
+
+/// **返回模型存储目录的绝对路径**
+///
+/// 前端可通过 `open_path` 命令在系统文件管理器中打开该目录。
+#[tauri::command]
+pub fn get_model_dir_path(app: AppHandle) -> Result<String, String> {
+    get_model_dir(&app)
+        .map_err(|e| e.to_string())
+        .map(|p| p.to_string_lossy().to_string())
 }

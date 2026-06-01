@@ -1,17 +1,18 @@
 import { NavLink } from 'react-router-dom';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
-import { Scissors, Film } from 'lucide-react';
+import { Scissors, Film, ScanText } from 'lucide-react';
 
 interface ToolItem {
-  key: 'subtitleExtraction' | 'compactVideo';
+  key: 'subtitleExtraction' | 'compactVideo' | 'hardSubtitleExtraction';
   path: string;
   Icon: React.ElementType;
 }
 
 const tools: ToolItem[] = [
-  { key: 'subtitleExtraction', path: '/tools/subtitle-extraction', Icon: Scissors },
-  { key: 'compactVideo',       path: '/tools/compact-video',       Icon: Film       },
+  { key: 'subtitleExtraction',     path: '/tools/subtitle-extraction',      Icon: Scissors  },
+  { key: 'compactVideo',           path: '/tools/compact-video',            Icon: Film      },
+  { key: 'hardSubtitleExtraction', path: '/tools/hard-subtitle-extraction', Icon: ScanText  },
 ];
 
 export function Sidebar() {

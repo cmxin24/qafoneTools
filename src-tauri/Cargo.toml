@@ -15,8 +15,9 @@ tauri-build = { version = "2", features = [] }
 # ─── 运行时依赖 ──────────────────────────────────────────────────────────────
 [dependencies]
 # Tauri 核心框架
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
 
 # 序列化 / 反序列化（用于 Tauri 命令参数及事件 payload）
 serde       = { version = "1", features = ["derive"] }
@@ -37,6 +38,17 @@ futures-util = "0.3"
 
 # 错误处理
 anyhow = "1"
+
+# 日志
+tracing = "0.1"
+
+# Whisper ASR (builds whisper.cpp from source — requires cmake + C++ compiler)
+# Metal is only available on macOS; other platforms fall back to CPU.
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.13", features = ["metal"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+whisper-rs = "0.13"
 
 # ─── Release 优化 ─────────────────────────────────────────────────────────────
 [profile.release]

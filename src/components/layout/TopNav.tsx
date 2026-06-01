@@ -1,4 +1,4 @@
-import { NavLink, useLocation } from 'react-router-dom';
+import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { useI18n } from '@/i18n';
 import { SettingsDialog } from '@/components/SettingsDialog';
 import { cn } from '@/lib/utils';
@@ -9,10 +9,11 @@ import {
   Clock3,
   Sparkles,
   Film,
-  ChevronRight,
+  Wrench,
 } from 'lucide-react';
 
 const workflowSteps = [
+  { key: 'preprocessing', path: '/preprocessing', Icon: Wrench },
   { key: 'translation', path: '/translation', Icon: Languages },
   { key: 'timeline', path: '/timeline', Icon: Clock },
   { key: 'proofreading', path: '/proofreading', Icon: CheckSquare },
@@ -24,16 +25,18 @@ const workflowSteps = [
 export function TopNav() {
   const { t } = useI18n();
   const location = useLocation();
+  const navigate = useNavigate();
 
   const currentStepIndex = workflowSteps.findIndex((s) => location.pathname.startsWith(s.path));
 
   return (
     <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-card/80 backdrop-blur-sm px-4 z-30">
-      {/* App Logo / Name */}
-      <div className="flex items-center gap-2 min-w-[160px]">
-        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground font-bold text-sm select-none">
-          QF
-        </div>
+      {/* App Logo / Name — click to go home */}
+      <div
+        className="flex cursor-pointer items-center gap-2 min-w-[160px] rounded-lg p-1 hover:bg-accent transition-colors"
+        onClick={() => navigate('/')}
+        title="Home"
+      >
         <span className="font-semibold text-foreground truncate">{t.nav.appName}</span>
       </div>
 
@@ -66,7 +69,7 @@ export function TopNav() {
                 </span>
               </NavLink>
               {index < workflowSteps.length - 1 && (
-                <ChevronRight className="h-3 w-3 text-muted-foreground/40 mx-0.5 shrink-0" />
+                <span className="mx-1 text-muted-foreground/30 select-none text-xs">|</span>
               )}
             </div>
           );

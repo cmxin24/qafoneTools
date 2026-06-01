@@ -10,26 +10,12 @@ import { Button } from '@/components/ui/button';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
-import { Settings, Moon, Sun } from 'lucide-react';
-import { useState, useEffect } from 'react';
+import { Settings, Moon, Sun, Monitor } from 'lucide-react';
+import { useTheme, type ThemeMode } from '@/contexts/ThemeContext';
 
 export function SettingsDialog() {
   const { t, locale, setLocale } = useI18n();
-  const [isDark, setIsDark] = useState(() => document.documentElement.classList.contains('dark'));
-
-  useEffect(() => {
-    const root = document.documentElement;
-    if (isDark) {
-      root.classList.add('dark');
-    } else {
-      root.classList.remove('dark');
-    }
-  }, [isDark]);
-
-  // Apply dark mode on mount by default
-  useEffect(() => {
-    document.documentElement.classList.add('dark');
-  }, []);
+  const { theme, setTheme } = useTheme();
 
   return (
     <Dialog>
@@ -61,18 +47,18 @@ export function SettingsDialog() {
                 <RadioGroupItem value="zh" id="lang-zh" className="peer sr-only" />
                 <Label
                   htmlFor="lang-zh"
-                  className="flex cursor-pointer items-center justify-center rounded-lg border-2 border-muted bg-popover p-3 hover:bg-accent hover:text-accent-foreground peer-data-[state=checked]:border-primary peer-data-[state=checked]:bg-primary/10 transition-all"
+                  className="flex cursor-pointer items-center justify-center rounded-lg border-2 border-muted bg-card p-3 hover:bg-accent hover:text-accent-foreground peer-data-[state=checked]:border-primary peer-data-[state=checked]:bg-primary/10 transition-all"
                 >
-                  🇨🇳 {t.settings.chinese}
+                  {t.settings.chinese}
                 </Label>
               </div>
               <div>
                 <RadioGroupItem value="en" id="lang-en" className="peer sr-only" />
                 <Label
                   htmlFor="lang-en"
-                  className="flex cursor-pointer items-center justify-center rounded-lg border-2 border-muted bg-popover p-3 hover:bg-accent hover:text-accent-foreground peer-data-[state=checked]:border-primary peer-data-[state=checked]:bg-primary/10 transition-all"
+                  className="flex cursor-pointer items-center justify-center rounded-lg border-2 border-muted bg-card p-3 hover:bg-accent hover:text-accent-foreground peer-data-[state=checked]:border-primary peer-data-[state=checked]:bg-primary/10 transition-all"
                 >
-                  🇺🇸 {t.settings.english}
+                  {t.settings.english}
                 </Label>
               </div>
             </RadioGroup>
@@ -86,26 +72,35 @@ export function SettingsDialog() {
               {t.settings.theme}
             </h3>
             <RadioGroup
-              value={isDark ? 'dark' : 'light'}
-              onValueChange={(val) => setIsDark(val === 'dark')}
-              className="grid grid-cols-2 gap-3"
+              value={theme}
+              onValueChange={(val) => setTheme(val as ThemeMode)}
+              className="grid grid-cols-3 gap-3"
             >
               <div>
                 <RadioGroupItem value="dark" id="theme-dark" className="peer sr-only" />
                 <Label
                   htmlFor="theme-dark"
-                  className="flex cursor-pointer items-center justify-center gap-2 rounded-lg border-2 border-muted bg-popover p-3 hover:bg-accent hover:text-accent-foreground peer-data-[state=checked]:border-primary peer-data-[state=checked]:bg-primary/10 transition-all"
+                  className="flex cursor-pointer items-center justify-center gap-1.5 rounded-lg border-2 border-muted bg-card p-3 hover:bg-accent hover:text-accent-foreground peer-data-[state=checked]:border-primary peer-data-[state=checked]:bg-primary/10 transition-all text-sm"
                 >
-                  <Moon className="h-4 w-4" /> {t.settings.dark}
+                  <Moon className="h-4 w-4 shrink-0" /> {t.settings.dark}
                 </Label>
               </div>
               <div>
                 <RadioGroupItem value="light" id="theme-light" className="peer sr-only" />
                 <Label
                   htmlFor="theme-light"
-                  className="flex cursor-pointer items-center justify-center gap-2 rounded-lg border-2 border-muted bg-popover p-3 hover:bg-accent hover:text-accent-foreground peer-data-[state=checked]:border-primary peer-data-[state=checked]:bg-primary/10 transition-all"
+                  className="flex cursor-pointer items-center justify-center gap-1.5 rounded-lg border-2 border-muted bg-card p-3 hover:bg-accent hover:text-accent-foreground peer-data-[state=checked]:border-primary peer-data-[state=checked]:bg-primary/10 transition-all text-sm"
                 >
-                  <Sun className="h-4 w-4" /> {t.settings.light}
+                  <Sun className="h-4 w-4 shrink-0" /> {t.settings.light}
+                </Label>
+              </div>
+              <div>
+                <RadioGroupItem value="system" id="theme-system" className="peer sr-only" />
+                <Label
+                  htmlFor="theme-system"
+                  className="flex cursor-pointer items-center justify-center gap-1.5 rounded-lg border-2 border-muted bg-card p-3 hover:bg-accent hover:text-accent-foreground peer-data-[state=checked]:border-primary peer-data-[state=checked]:bg-primary/10 transition-all text-sm"
+                >
+                  <Monitor className="h-4 w-4 shrink-0" /> {t.settings.system}
                 </Label>
               </div>
             </RadioGroup>
@@ -115,3 +110,5 @@ export function SettingsDialog() {
     </Dialog>
   );
 }
+
+

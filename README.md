@@ -1,73 +1,90 @@
-# React + TypeScript + Vite
+# qafoneTools
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+qafoneTools 是为QAF中文站志愿者制作的字幕组工具合集，支持 macOS 与 Windows 双平台。
 
-Currently, two official plugins are available:
+## 功能
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+### 预处理
 
-## React Compiler
+| 工具 | 说明 |
+|------|------|
+| 视频字幕提取 | 使用本地 AI 模型进行语音识别，输出 SRT 字幕文件 |
+| 音频提取 | 从视频中提取音轨，支持试听、选轨、格式与码率设置 |
+| 小版本压制 | 输出便于成员间传输的小体积 MP4 |
+| 硬字幕提取 | 从已嵌入硬字幕的视频帧中提取文字字幕 |
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+### 翻译
 
-## Expanding the ESLint configuration
+导入原文 SRT，在时间轴视图中逐行翻译，支持波形图辅助对齐。
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+### 时间轴 / 二轴
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+制作中...
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+### 校对
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+制作中...
+
+### 特效
+
+| 工具 | 说明 |
+|------|------|
+| 双语字幕分离 | 将双语 SRT 拆分为独立的中文与外语字幕文件 |
+| ASS 样式配置 | SRT/ASS 转标准 ASS，按分辨率自动配置字体、字号和边距预设 |
+| 致谢名单生成 | 从职位-姓名列表一键生成带淡入淡出效果的 ASS 致谢字幕 |
+| Logo 生成器 | 按分辨率等比缩放，生成 QAFONE logo 的 ASS 特效代码 |
+
+### 压制
+
+| 工具 | 说明 |
+|------|------|
+| FFmpeg 命令生成器 | 通过可视化界面配置压制参数，生成可直接使用的 FFmpeg 命令 |
+
+## 开发
+
+### 环境要求
+
+- **Node.js** ≥ 18
+- **Rust** 稳定版（通过 [rustup](https://rustup.rs) 安装）
+- **CMake** 和 C++ 编译器（用于编译 whisper.cpp）
+  - macOS：`xcode-select --install`
+  - Windows：Visual Studio Build Tools + CMake
+
+### 本地启动
+
+```bash
+# 安装前端依赖
+npm install
+
+# 启动开发模式（Tauri 窗口 + Vite HMR）
+npm run tauri:dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+### 构建发行版
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm run tauri:build
 ```
+
+产物位于 `src-tauri/target/release/bundle/`。
+
+### 目录结构
+
+```
+src/                    # 前端（React）
+  components/           # 通用组件（布局、UI）
+  pages/                # 页面
+    tools/              # 预处理工具页面
+    effects/            # 特效工具页面
+    encoding/           # 压制工具页面
+  i18n/                 # 国际化（en.ts / zh.ts）
+  contexts/             # React Context
+src-tauri/              # 后端（Rust / Tauri）
+  src/commands/         # Tauri 命令（ASR、压制、下载等）
+  binaries/             # sherpa-onnx sidecar 二进制
+```
+
+## License
+
+本项目采用 [AGPL-3.0 协议](LICENSE) 开源。
+

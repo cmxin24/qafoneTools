@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useI18n } from '@/i18n';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
@@ -25,6 +26,7 @@ import {
   Package,
   Crop,
   Gauge,
+  FolderInput,
 } from 'lucide-react';
 
 // ─── 分辨率预设 ─────────────────────────────────────────────────────────────────
@@ -76,12 +78,41 @@ async function tauriDownloadFfmpeg(): Promise<void> {
 
 async function tauriCompressVideo(
   inputPath: string,
+  outputPath: string,
   targetHeight: number,
   autoCrop: boolean,
 ): Promise<string> {
   if (!isTauri()) return '';
   const { invoke } = await import('@tauri-apps/api/core');
-  return invoke<string>('compress_video', { inputPath, targetHeight, autoCrop });
+  return invoke<string>('compress_video', { inputPath, outputPath, targetHeight, autoCrop });
+}
+
+/** 通过 Tauri dialog 打开视频文件选择器，返回文件路径和名称 */
+async function pickVideoFile(): Promise<{ path: string; name: string } | null> {
+  if (!isTauri()) return null;
+  const { open } = await import('@tauri-apps/plugin-dialog');
+  const result = await open({
+    multiple: false,
+    filters: [{ name: 'Video', extensions: ['mp4', 'mkv', 'mov', 'avi', 'ts', 'wmv', 'm4v', 'webm'] }],
+  });
+  if (typeof result === 'string' && result) {
+    const name = result.replace(/\\/g, '/').split('/').pop() ?? result;
+    return { path: result, name };
+  }
+  return null;
+}
+
+/** 计算默认输出路径：相同目录，文件名加 _小版本 后缀 */
+function defaultOutputPath(inputPath: string): string {
+  const normalized = inputPath.replace(/\\/g, '/');
+  const lastSlash = normalized.lastIndexOf('/');
+  const filename = lastSlash >= 0 ? normalized.slice(lastSlash + 1) : normalized;
+  const dir = lastSlash >= 0 ? normalized.slice(0, lastSlash + 1) : '';
+  const lastDot = filename.lastIndexOf('.');
+  if (lastDot > 0) {
+    return dir + filename.slice(0, lastDot) + '_小版本' + filename.slice(lastDot);
+  }
+  return dir + filename + '_小版本';
 }
 
 // ─── 工具函数 ─────────────────────────────────────────────────────────────────
@@ -130,6 +161,9 @@ interface DroppedFile {
 export default function CompactVideoPage() {
   const { t, locale } = useI18n();
   const cv = t.compactVideo;
+  const location = useLocation();
+  const locationRef = useRef(location.pathname);
+  useEffect(() => { locationRef.current = location.pathname; }, [location.pathname]);
 
   // ── 文件状态 ──────────────────────────────────────────────────────────────
   const [droppedFile, setDroppedFile] = useState<DroppedFile | null>(null);
@@ -147,21 +181,64 @@ export default function CompactVideoPage() {
   // ── 压制状态 ──────────────────────────────────────────────────────────────
   const [compressPhase, setCompressPhase] = useState<CompressPhase>('idle');
   const [compressProgress, setCompressProgress] = useState(0);
-  const [outputPath, setOutputPath] = useState<string | null>(null);
+  const [outputPath, setOutputPath] = useState<string | null>(null);  const [compressError, setCompressError] = useState<string | null>(null);
 
+  // ── 自定义输出路径 ───────────────────────────────────────────
+  const [customOutputPath, setCustomOutputPath] = useState('');
   // ── 派生值 ────────────────────────────────────────────────────────────────
   const selectedPreset = RESOLUTION_PRESETS.find((p) => p.height === targetHeight)!;
   const isDownloading =
     ffmpegDownload.phase === 'speed-testing' || ffmpegDownload.phase === 'downloading';
   const isCompressing = compressPhase === 'crop_detect' || compressPhase === 'encoding';
-
+  // ── 文件变更时自动更新输出路径 ──────────────
+  useEffect(() => {
+    if (droppedFile?.path) {
+      setCustomOutputPath(defaultOutputPath(droppedFile.path ?? droppedFile.name));
+    } else {
+      setCustomOutputPath('');
+    }
+  }, [droppedFile?.path]);
   // ── 挂载时检测 FFmpeg ──────────────────────────────────────────────────────
   useEffect(() => {
     tauriCheckFfmpegStatus().then((found) => {
       setFfmpegStatus(found ? 'available' : 'not-found');
     });
   }, []);
-
+  // ── Tauri 原生拖放事件 ───────────────────────────────────────
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+      unlisten = await getCurrentWebviewWindow().onDragDropEvent((event) => {
+        // Only handle events when this page is active
+        if (locationRef.current !== '/tools/compact-video') return;
+        const { type } = event.payload;
+        if (type === 'enter' || type === 'over') {
+          setIsDragging(true);
+        } else if (type === 'leave') {
+          setIsDragging(false);
+        } else if (type === 'drop' && 'paths' in event.payload) {
+          setIsDragging(false);
+          const path = event.payload.paths[0];
+          if (path) {
+            const name = path.replace(/\\/g, '/').split('/').pop() ?? path;
+            setDroppedFile({ name, size: 0, path });
+            setCompressPhase('idle');
+            setOutputPath(null);
+            setCompressError(null);
+            // Fetch actual file size from Rust
+            import('@tauri-apps/api/core').then(({ invoke: tauriInvoke }) => {
+              tauriInvoke<number>('get_file_size', { path }).then((sz) => {
+                setDroppedFile((prev) => prev?.path === path ? { ...prev, size: sz } : prev);
+              }).catch(() => {/* ignore */});
+            });
+          }
+        }
+      });
+    })();
+    return () => { unlisten?.(); };
+  }, []);
   // ── 监听 FFmpeg 下载进度事件 ────────────────────────────────────────────────
   useEffect(() => {
     if (!isTauri()) return;
@@ -244,11 +321,12 @@ export default function CompactVideoPage() {
 
     if (isTauri()) {
       try {
-        const out = await tauriCompressVideo(droppedFile.path ?? '', targetHeight, autoCrop);
+        const out = await tauriCompressVideo(droppedFile.path ?? '', customOutputPath || defaultOutputPath(droppedFile.path ?? droppedFile.name), targetHeight, autoCrop);
         setOutputPath(out);
         setCompressPhase('done');
       } catch (err) {
         console.error('Compression failed:', err);
+        setCompressError(String(err));
         setCompressPhase('error');
       }
     } else {
@@ -260,18 +338,24 @@ export default function CompactVideoPage() {
         await new Promise((r) => setTimeout(r, 120));
         setCompressProgress((i / STEPS) * 100);
       }
-      setOutputPath('/mock/output/video_small.mp4');
+      setOutputPath(customOutputPath || '/mock/output/video_小版本.mp4');
       setCompressPhase('done');
     }
-  }, [droppedFile, ffmpegStatus, targetHeight, autoCrop]);
+  }, [droppedFile, ffmpegStatus, targetHeight, autoCrop, customOutputPath]);
 
   // ── 文件拖拽 ────────────────────────────────────────────────────────────────
+  // 非 Tauri 环境（浏览器 dev）才使用 HTML DnD
   const handleDragOver = useCallback((e: React.DragEvent) => {
+    if (isTauri()) return;
     e.preventDefault();
     setIsDragging(true);
   }, []);
-  const handleDragLeave = useCallback(() => setIsDragging(false), []);
+  const handleDragLeave = useCallback(() => {
+    if (isTauri()) return;
+    setIsDragging(false);
+  }, []);
   const handleDrop = useCallback((e: React.DragEvent) => {
+    if (isTauri()) return;
     e.preventDefault();
     setIsDragging(false);
     const file = e.dataTransfer.files[0];
@@ -279,20 +363,46 @@ export default function CompactVideoPage() {
       setDroppedFile({ name: file.name, size: file.size });
       setCompressPhase('idle');
       setOutputPath(null);
+      setCompressError(null);
     }
   }, []);
+
+  // 点击浏览——Tauri 下用 dialog，浏览器用 file input
+  const handleBrowse = useCallback(async () => {
+    if (droppedFile) return;
+    if (isTauri()) {
+      const picked = await pickVideoFile();
+      if (picked) {
+        setDroppedFile({ name: picked.name, size: 0, path: picked.path });
+        setCompressPhase('idle');
+        setOutputPath(null);
+        setCompressError(null);
+        // Fetch actual file size from Rust
+        const { invoke: tauriInvoke } = await import('@tauri-apps/api/core');
+        tauriInvoke<number>('get_file_size', { path: picked.path }).then((sz) => {
+          setDroppedFile((prev) => prev?.path === picked.path ? { ...prev, size: sz } : prev);
+        }).catch(() => {/* ignore */});
+      }
+    } else {
+      fileInputRef.current?.click();
+    }
+  }, [droppedFile]);
+
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       setDroppedFile({ name: file.name, size: file.size });
       setCompressPhase('idle');
       setOutputPath(null);
+      setCompressError(null);
     }
   }, []);
   const handleClearFile = useCallback(() => {
     setDroppedFile(null);
     setCompressPhase('idle');
     setOutputPath(null);
+    setCompressError(null);
+    setCustomOutputPath('');
     if (fileInputRef.current) fileInputRef.current.value = '';
   }, []);
 
@@ -323,23 +433,55 @@ export default function CompactVideoPage() {
             ? ffmpegDownload.phase === 'speed-testing'
               ? cv.ffmpegDownloadSpeedTesting
               : `${Math.round(ffmpegDownload.percentage)}%`
-            : `📥 ${cv.downloadFfmpeg}`}
+            : `${cv.downloadFfmpeg}`}
         </Button>
       );
     }
 
+    if (compressPhase === 'error') {
+      return (
+        <div className="space-y-2">
+          <div className="flex items-start gap-2 rounded-lg bg-destructive/10 border border-destructive/20 px-3 py-2">
+            <AlertCircle className="h-4 w-4 text-destructive shrink-0 mt-0.5" />
+            <p className="text-xs text-destructive leading-relaxed break-all">
+              {compressError ?? '压制失败'}
+            </p>
+          </div>
+          <Button className="w-full gap-2" variant="outline" onClick={() => setCompressPhase('idle')}>
+            重试
+          </Button>
+        </div>
+      );
+    }
+
     if (compressPhase === 'done') {
+      const folderPath = outputPath
+        ? outputPath.replace(/\\/g, '/').split('/').slice(0, -1).join('/')
+        : null;
+
+      const handleOpenFolder = async () => {
+        if (!isTauri() || !folderPath) return;
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('open_path', { path: folderPath });
+      };
+
+      const handleOpenFile = async () => {
+        if (!isTauri() || !outputPath) return;
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('open_path', { path: outputPath });
+      };
+
       return (
         <div className="space-y-2 animate-in fade-in duration-300">
           <div className="flex items-center gap-2 rounded-lg bg-green-500/10 border border-green-500/20 px-3 py-2">
             <CheckCircle2 className="h-4 w-4 text-green-500 shrink-0" />
             <p className="text-sm font-medium text-green-400">{cv.compressComplete}</p>
           </div>
-          <Button className="w-full gap-2" variant="outline">
+          <Button className="w-full gap-2" variant="outline" onClick={handleOpenFolder} disabled={!isTauri() || !folderPath}>
             <FolderOpen className="h-4 w-4" />
             {cv.openOutputFolder}
           </Button>
-          <Button className="w-full gap-2" variant="outline">
+          <Button className="w-full gap-2" variant="outline" onClick={handleOpenFile} disabled={!isTauri() || !outputPath}>
             <Film className="h-4 w-4" />
             {cv.openOutput}
           </Button>
@@ -400,12 +542,10 @@ export default function CompactVideoPage() {
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
               onDrop={handleDrop}
-              onClick={() => !droppedFile && fileInputRef.current?.click()}
+              onClick={handleBrowse}
               role="button"
               tabIndex={0}
-              onKeyDown={(e) =>
-                e.key === 'Enter' && !droppedFile && fileInputRef.current?.click()
-              }
+              onKeyDown={(e) => e.key === 'Enter' && handleBrowse()}
             >
               <input
                 ref={fileInputRef}
@@ -504,6 +644,48 @@ export default function CompactVideoPage() {
                 <span className="text-xs text-muted-foreground leading-snug">{cv.autoCropHint}</span>
               </div>
             </label>
+
+            <Separator />
+
+            {/* 输出路径 */}
+            <div className="space-y-1.5">
+              <Label className="text-sm text-muted-foreground flex items-center gap-1.5">
+                <FolderInput className="h-3.5 w-3.5" />
+                {locale === 'zh' ? '输出路径' : 'Output Path'}
+              </Label>
+              <div className="flex gap-1.5">
+                <input
+                  type="text"
+                  value={customOutputPath}
+                  onChange={(e) => setCustomOutputPath(e.target.value)}
+                  placeholder=""
+                  className="flex-1 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-mono text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-primary/50"
+                />
+                {isTauri() && (
+                  <button
+                    type="button"
+                    title={locale === 'zh' ? '选择输出目录' : 'Choose output folder'}
+                    className="flex items-center justify-center rounded-md border border-border bg-muted/50 px-2 hover:bg-muted transition-colors"
+                    onClick={async () => {
+                      const { open } = await import('@tauri-apps/plugin-dialog');
+                      const dir = await open({ directory: true, multiple: false });
+                      if (typeof dir === 'string' && dir) {
+                        const normalized = dir.replace(/\\/g, '/');
+                        const filenameFromPath = customOutputPath.replace(/\\/g, '/').split('/').pop() ?? '';
+                        const fallbackName = droppedFile
+                          ? defaultOutputPath(droppedFile.path ?? droppedFile.name).replace(/\\/g, '/').split('/').pop() ?? ''
+                          : '';
+                        const filename = filenameFromPath || fallbackName;
+                        setCustomOutputPath(filename ? `${normalized}/${filename}` : normalized);
+                      }
+                    }}
+                  >
+                    <FolderOpen className="h-3.5 w-3.5 text-muted-foreground" />
+                  </button>
+                )}
+              </div>
+
+            </div>
           </section>
         </div>
 

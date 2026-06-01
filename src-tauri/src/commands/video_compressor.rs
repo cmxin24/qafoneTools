@@ -93,22 +93,54 @@ fn ffmpeg_bin_path(app: &AppHandle) -> Result<PathBuf> {
 }
 
 /// 检查系统 PATH 或应用数据目录中是否存在可用的 ffmpeg 二进制。
-fn resolve_ffmpeg_executable(app: &AppHandle) -> Option<PathBuf> {
+///
+/// 检测顺序：
+/// 1. 应用数据目录中的自带静态包（由 `download_ffmpeg` 命令写入）
+/// 2. 常见系统安装路径（Homebrew / apt / snap 等）
+///    macOS 的 GUI 应用不继承 shell 的 $PATH，必须显式检查
+/// 3. 通过 `which` / `where` 查询当前进程的 PATH 环境变量
+pub(crate) fn resolve_ffmpeg_executable(app: &AppHandle) -> Option<PathBuf> {
     // 1. 先检查应用自带的 ffmpeg
     if let Ok(bundled) = ffmpeg_bin_path(app) {
         if bundled.exists() {
             return Some(bundled);
         }
     }
-    // 2. 检查系统 PATH（which ffmpeg）
-    if let Ok(output) = std::process::Command::new("which").arg("ffmpeg").output() {
+
+    // 2. 检查常见系统路径（macOS GUI 应用无法继承完整 shell PATH）
+    #[cfg(not(windows))]
+    {
+        let common: &[&str] = &[
+            "/opt/homebrew/bin/ffmpeg",   // Apple Silicon — Homebrew
+            "/usr/local/bin/ffmpeg",      // Intel macOS — Homebrew / 手动编译
+            "/usr/bin/ffmpeg",            // Linux — apt / dnf
+            "/snap/bin/ffmpeg",           // Linux — snap
+            "/nix/var/nix/profiles/default/bin/ffmpeg", // Nix
+        ];
+        for &p in common {
+            let path = PathBuf::from(p);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+
+    // 3. 通过 which / where 查询进程 PATH
+    let which_cmd = if cfg!(windows) { "where" } else { "which" };
+    if let Ok(output) = std::process::Command::new(which_cmd).arg("ffmpeg").output() {
         if output.status.success() {
-            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let path_str = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
             if !path_str.is_empty() {
                 return Some(PathBuf::from(path_str));
             }
         }
     }
+
     None
 }
 
@@ -216,6 +248,7 @@ pub async fn download_ffmpeg(app: AppHandle) -> Result<(), String> {
 pub async fn compress_video(
     app: AppHandle,
     input_path: String,
+    output_path: String,
     target_height: u32,
     auto_crop: bool,
 ) -> Result<String, String> {
@@ -227,12 +260,17 @@ pub async fn compress_video(
         return Err(format!("输入文件不存在: {input_path}"));
     }
 
-    // ── 1. 构造输出路径（原文件名 + "_small.mp4"）─────────────────────────
-    let stem = input.file_stem().unwrap_or_default().to_string_lossy();
-    let output_path = input
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join(format!("{stem}_small.mp4"));
+    // ── 1. 构造输出路径（优先使用前端传入的路径，否则默认加 _小版本 后缀）──────
+    let resolved_output = if output_path.trim().is_empty() {
+        let stem = input.file_stem().unwrap_or_default().to_string_lossy();
+        let ext  = input.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_else(|| ".mp4".to_string());
+        input
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(format!("{stem}_小版本{ext}"))
+    } else {
+        PathBuf::from(&output_path)
+    };
 
     // ── 2. 阶段一：黑边检测 ───────────────────────────────────────────────
     let _ = app.emit(
@@ -278,7 +316,7 @@ pub async fn compress_video(
             "-ac", "2",
             // 容器优化
             "-movflags", "+faststart",
-            output_path.to_str().unwrap_or("output.mp4"),
+            resolved_output.to_str().unwrap_or("output.mp4"),
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -307,7 +345,7 @@ pub async fn compress_video(
         VideoCompressProgressPayload { phase: "done".into(), progress_pct: 100.0 },
     );
 
-    Ok(output_path.to_string_lossy().into_owned())
+    Ok(resolved_output.to_string_lossy().into_owned())
 }
 
 // ─── 内部函数 ──────────────────────────────────────────────────────────────────
@@ -363,4 +401,123 @@ async fn detect_crop(
     // 简单判断：若 crop 参数包含 "x:0 y:0" 且宽高与原视频一致，则视为无黑边
     // 实际生产中应对比 stream 信息；此处骨架直接返回检测结果
     Ok(crop_str)
+}
+
+// ─── 系统文件打开 ──────────────────────────────────────────────────────────────
+
+/// 用系统默认应用打开文件或目录（相当于 Finder 的"显示简介"或双击）。
+///
+/// * macOS / Linux：调用 `open` / `xdg-open`
+/// * Windows：调用 `explorer`
+///
+/// 使用 spawn 而不等待退出码，避免阻塞前端调用。
+#[tauri::command]
+pub fn open_path(path: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Failed to open path: {e}"))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Failed to open path: {e}"))?;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Failed to open path: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Return the byte-length of a file at the given path.
+/// Used by the frontend to display accurate file sizes for Tauri drag-drop files.
+#[tauri::command]
+pub fn get_file_size(path: String) -> Result<u64, String> {
+    std::fs::metadata(&path)
+        .map(|m| m.len())
+        .map_err(|e| format!("Failed to read file metadata: {e}"))
+}
+
+/// Write UTF-8 text content to a file at the given absolute path.
+///
+/// The frontend first calls `@tauri-apps/plugin-dialog` `save()` to obtain the
+/// user-chosen path, then calls this command to perform the actual write.
+#[tauri::command]
+pub fn save_text_file(path: String, content: String) -> Result<(), String> {
+    std::fs::write(&path, content.as_bytes())
+        .map_err(|e| format!("写入文件失败: {e}"))
+}
+
+/// Read a UTF-8 text file and return its contents.
+///
+/// Used by the AssFormatter tool to load SRT/ASS subtitle files that were
+/// selected via the native drag-drop listener (which returns a path, not a
+/// File object with content).
+#[tauri::command]
+pub fn read_text_file(path: String) -> Result<String, String> {
+    std::fs::read_to_string(&path).map_err(|e| format!("读取文件失败: {e}"))
+}
+
+// ─── Video resolution probe ────────────────────────────────────────────────────
+
+/// Resolution returned by `get_video_resolution`.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct VideoResolution {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Parse `WxH` from the Video stream line emitted by `ffmpeg -i`.
+///
+/// Example line (trimmed):
+/// `Stream #0:0(und): Video: h264 (High), yuv420p, 1920x1080 [SAR 1:1 DAR 16:9], …`
+fn parse_video_res(stderr: &str) -> Option<VideoResolution> {
+    for line in stderr.lines() {
+        if !line.contains(": Video:") {
+            continue;
+        }
+        for word in line.split_whitespace() {
+            let clean = word.trim_end_matches(',').trim_end_matches(';');
+            if let Some((w_str, rest)) = clean.split_once('x') {
+                // The height token may be followed by extra chars like "[SAR…"
+                let h_str: &str = rest
+                    .split(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .unwrap_or("");
+                if let (Ok(w), Ok(h)) = (w_str.parse::<u32>(), h_str.parse::<u32>()) {
+                    // Sanity bounds: reject bogus matches like "1x1" or "9999x9999"
+                    if w >= 120 && h >= 120 && w <= 8192 && h <= 8192 {
+                        return Some(VideoResolution { width: w, height: h });
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Probe a video file with FFmpeg and return its resolution.
+#[tauri::command]
+pub async fn get_video_resolution(app: AppHandle, path: String) -> Result<VideoResolution, String> {
+    let ffmpeg =
+        resolve_ffmpeg_executable(&app).ok_or_else(|| "FFmpeg 未找到".to_string())?;
+
+    let output = tokio::process::Command::new(&ffmpeg)
+        .args(["-i", &path])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("FFmpeg 运行失败: {e}"))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    parse_video_res(&stderr).ok_or_else(|| "未找到视频流信息".to_string())
 }
