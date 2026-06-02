@@ -28,6 +28,51 @@ pub struct CancellationFlag(pub Arc<AtomicBool>);
 use super::model_manager::get_model_path;
 use super::video_compressor::resolve_ffmpeg_executable;
 
+trait WhisperStateSegmentCompat {
+    fn full_get_segment_text(&self, segment: i32) -> Result<String, String>;
+    fn full_get_segment_t0(&self, segment: i32) -> Result<i64, String>;
+    fn full_get_segment_t1(&self, segment: i32) -> Result<i64, String>;
+}
+
+impl WhisperStateSegmentCompat for whisper_rs::WhisperState {
+    fn full_get_segment_text(&self, segment: i32) -> Result<String, String> {
+        self.get_segment(segment)
+            .ok_or_else(|| format!("segment {segment} out of bounds"))?
+            .to_str()
+            .map(str::to_owned)
+            .map_err(|e| e.to_string())
+    }
+
+    fn full_get_segment_t0(&self, segment: i32) -> Result<i64, String> {
+        Ok(self
+            .get_segment(segment)
+            .ok_or_else(|| format!("segment {segment} out of bounds"))?
+            .start_timestamp())
+    }
+
+    fn full_get_segment_t1(&self, segment: i32) -> Result<i64, String> {
+        Ok(self
+            .get_segment(segment)
+            .ok_or_else(|| format!("segment {segment} out of bounds"))?
+            .end_timestamp())
+    }
+}
+
+trait InfallibleI32MapErr {
+    fn map_err<F, E>(self, _op: F) -> Result<i32, E>
+    where
+        F: FnOnce(String) -> E;
+}
+
+impl InfallibleI32MapErr for i32 {
+    fn map_err<F, E>(self, _op: F) -> Result<i32, E>
+    where
+        F: FnOnce(String) -> E,
+    {
+        Ok(self)
+    }
+}
+
 // ─── Public types ─────────────────────────────────────────────────────────────
 
 /// A single transcribed segment, mirroring the SRT block structure.
@@ -251,7 +296,7 @@ pub async fn extract_subtitles(
                 params.set_temperature(0.2f32);
                 params.set_temperature_inc(0.0f32);      // no fallback retry
                 params.set_no_speech_thold(0.6f32);
-                params.set_suppress_non_speech_tokens(true);
+                params.set_suppress_nst(true);
 
                 // Mirror VoiceInk's thread formula: max(1, min(8, cpu_count - 2)).
                 let n_threads = std::thread::available_parallelism()

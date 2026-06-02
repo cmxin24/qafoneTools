@@ -45,10 +45,10 @@ tracing = "0.1"
 # Whisper ASR (builds whisper.cpp from source — requires cmake + C++ compiler)
 # Metal is only available on macOS; other platforms fall back to CPU.
 [target.'cfg(target_os = "macos")'.dependencies]
-whisper-rs = { version = "0.13", features = ["metal"] }
+whisper-rs = { version = "0.16", features = ["metal"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-whisper-rs = "0.13"
+whisper-rs = "0.16"
 
 # ─── Release 优化 ─────────────────────────────────────────────────────────────
 [profile.release]
