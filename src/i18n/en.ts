@@ -175,9 +175,19 @@ export interface Translations {
     timecode: string;
     original: string;
     translation: string;
+    translationNote: string;
     exportOriginal: string;
     exportTranslation: string;
     exportBilingual: string;
+    exportTranslationNotes: string;
+    translationNotesTitle: string;
+    translationNotesEmpty: string;
+    autosaveSaving: string;
+    autosaveSaved: string;
+    autosaveError: string;
+    autosaveBrowser: string;
+    layoutSideBySide: string;
+    layoutStacked: string;
     placeholder: string;
     subtitleUp: string;
     subtitleDown: string;
@@ -187,6 +197,10 @@ export interface Translations {
     extractingWaveform: string;
     waveformError: string;
     insertSubtitle: string;
+    insertBlankBefore: string;
+    insertBlankAfter: string;
+    insertBlankFailed: string;
+    splitSubtitle: string;
     deleteSubtitle: string;
     mergePrev: string;
     mergeNext: string;
@@ -211,9 +225,46 @@ export interface Translations {
     glossaryButton: string;
     exitDialogTitle: string;
     exitDialogMessage: string;
+    exitDialogGlossaryMessage: string;
+    exitDialogBothMessage: string;
     exitDialogExport: string;
+    exitDialogExportGlossary: string;
+    exitDialogExportBoth: string;
     exitDialogDiscard: string;
     exitDialogCancel: string;
+  };
+  proofreadingPage: {
+    title: string;
+    subtitle: string;
+    dropTranslation: string;
+    dropTranslationHint: string;
+    proofreadingFileTitle: string;
+    proofreadingFileHint: string;
+    createProofreadFile: string;
+    importProofreadFile: string;
+    proofreadFileReady: string;
+    autosaveSaving: string;
+    autosaveSaved: string;
+    autosaveError: string;
+    autosaveBrowser: string;
+    exportFinal: string;
+    exportNotes: string;
+    notesExportTitle: string;
+    notesExportEmpty: string;
+    subBoth: string;
+    subTranslated: string;
+    subNone: string;
+    time: string;
+    original: string;
+    previousTranslation: string;
+    finalTranslation: string;
+    proofreadNote: string;
+    translationPlaceholder: string;
+    changed: string;
+    exitDialogMessage: string;
+    exitDialogBothMessage: string;
+    exitDialogExport: string;
+    exitDialogExportBoth: string;
   };
   effectsPage: {
     title: string;
@@ -534,9 +585,19 @@ const en: Translations = {
     timecode: 'Timecode',
     original: 'Original',
     translation: 'Translation',
+    translationNote: 'Translation Note',
     exportOriginal: 'Export Original',
     exportTranslation: 'Export Translation',
     exportBilingual: 'Export Bilingual',
+    exportTranslationNotes: 'Export Notes',
+    translationNotesTitle: 'Translation Notes',
+    translationNotesEmpty: 'No translations or translation notes yet.',
+    autosaveSaving: 'Saving...',
+    autosaveSaved: 'Saved',
+    autosaveError: 'Save failed',
+    autosaveBrowser: 'Browser session',
+    layoutSideBySide: 'Wide Layout',
+    layoutStacked: 'Stacked Layout',
     placeholder: 'Enter translation…',
     subtitleUp: 'Move subtitle up',
     subtitleDown: 'Move subtitle down',
@@ -546,6 +607,10 @@ const en: Translations = {
     extractingWaveform: 'Extracting waveform…',
     waveformError: 'Waveform extraction failed',
     insertSubtitle: 'Insert subtitle here',
+    insertBlankBefore: 'Insert blank before',
+    insertBlankAfter: 'Insert blank after',
+    insertBlankFailed: 'Insert failed: there is no available space.',
+    splitSubtitle: 'Split current subtitle',
     deleteSubtitle: 'Delete subtitle',
     mergePrev: 'Merge with previous',
     mergeNext: 'Merge with next',
@@ -570,9 +635,46 @@ const en: Translations = {
     glossaryButton: 'Glossary',
     exitDialogTitle: 'Unsaved Changes',
     exitDialogMessage: 'You have unsaved subtitle entries. Export before closing?',
+    exitDialogGlossaryMessage: 'You have unsaved glossary changes. Export the glossary before closing?',
+    exitDialogBothMessage: 'You have unsaved subtitle entries and glossary changes. Export both files before closing?',
     exitDialogExport: 'Export Translation & Close',
+    exitDialogExportGlossary: 'Export Glossary & Close',
+    exitDialogExportBoth: 'Export Both & Close',
     exitDialogDiscard: 'Close Without Saving',
     exitDialogCancel: 'Cancel',
+  },
+  proofreadingPage: {
+    title: 'Proofreading',
+    subtitle: 'Review translated subtitles, refine wording, and record revision notes.',
+    dropTranslation: 'Drop translated SRT here',
+    dropTranslationHint: 'Use the translated subtitle as the unchanged reference.',
+    proofreadingFileTitle: 'Proofreading file',
+    proofreadingFileHint: 'Create a new proofreading copy or continue from an existing one.',
+    createProofreadFile: 'Create New Proofreading File',
+    importProofreadFile: 'Import Proofreading File',
+    proofreadFileReady: 'Proofreading file ready',
+    autosaveSaving: 'Saving...',
+    autosaveSaved: 'Saved',
+    autosaveError: 'Save failed',
+    autosaveBrowser: 'Browser session',
+    exportFinal: 'Save a Copy',
+    exportNotes: 'Export Notes',
+    notesExportTitle: 'Proofreading Notes',
+    notesExportEmpty: 'No changed translations or proofreading notes yet.',
+    subBoth: 'Both',
+    subTranslated: 'Final',
+    subNone: 'None',
+    time: 'Time',
+    original: 'Original',
+    previousTranslation: 'Previous translation',
+    finalTranslation: 'Final translation',
+    proofreadNote: 'Proofreading Note',
+    translationPlaceholder: 'Edit final translation...',
+    changed: 'Changed from previous translation',
+    exitDialogMessage: 'You have unsaved proofreading changes. Export before closing?',
+    exitDialogBothMessage: 'You have unsaved proofreading changes and glossary changes. Export both files before closing?',
+    exitDialogExport: 'Export Proofreading File & Close',
+    exitDialogExportBoth: 'Export Both & Close',
   },
   effectsPage: {
     title: 'Effects Tools',

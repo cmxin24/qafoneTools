@@ -1,5 +1,5 @@
 import { useI18n } from '@/i18n';
-import { cn } from '@/lib/utils';
+import { cn } from '@/components/ui/utils';
 import type { LucideIcon } from 'lucide-react';
 
 interface WorkflowPlaceholderProps {

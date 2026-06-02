@@ -1,7 +1,7 @@
 import { useNavigate } from 'react-router-dom';
 import { useI18n } from '@/i18n';
 import { Scissors, Film, ScanText, Music2 } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { cn } from '@/components/ui/utils';
 
 interface ToolCard {
   navKey: 'subtitleExtraction' | 'compactVideo' | 'hardSubtitleExtraction' | 'audioExtraction';

@@ -11,7 +11,7 @@ import {
   SelectItem,
   SelectTrigger,
 } from '@/components/ui/select';
-import { cn } from '@/lib/utils';
+import { cn } from '@/components/ui/utils';
 import {
   Film,
   UploadCloud,

@@ -4,453 +4,120 @@ import {
   useRef,
   useCallback,
   type DragEvent,
-  type KeyboardEvent,
 } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { invoke } from '@tauri-apps/api/core';
 import { useI18n } from '@/i18n';
 import { Button } from '@/components/ui/button';
 import {
-  Play,
-  Pause,
-  SkipBack,
-  SkipForward,
-  ChevronUp,
-  ChevronDown,
   Download,
-  MoreVertical,
   Film,
   FileText,
-  CheckCircle2,
   X,
   BookOpen,
-  Plus,
-  Trash2,
+  Columns2,
+  Rows3,
 } from 'lucide-react';
 import { WaveformDisplay, type SrtEntry } from '@/components/WaveformDisplay';
+import { PlaybackControls } from '@/components/subtitle/PlaybackControls';
+import { GlossaryDialog, countGlossaryEntries, downloadGlossary, type GlossaryEntry } from '@/components/subtitle/GlossaryDialog';
+import { SubtitleEditTable, type SubtitleEditColumn } from '@/components/subtitle/SubtitleEditTable';
+import { SubtitleImportView } from '@/components/subtitle/SubtitleImportView';
+import { SubtitleOffsetControls } from '@/components/subtitle/SubtitleOffsetControls';
+import { SubtitleVideoPreview } from '@/components/subtitle/SubtitleVideoPreview';
+import { claimCloseGuard, releaseCloseGuard } from '@/components/subtitle/closeGuardCoordinator';
+import { useSpacebarPlaybackShortcut } from '@/components/subtitle/useSpacebarPlaybackShortcut';
+import {
+  SPEEDS,
+  deleteSubtitleEntry,
+  downloadFile,
+  exportSrt,
+  insertBlankSubtitleEntry,
+  insertSubtitleEntry,
+  mergeSubtitleEntries,
+  msToSrtTime,
+  parseSrt,
+  splitSubtitleEntry,
+  splitSubtitleText,
+  type FFmpegStatus,
+  type SubtitleMode,
+  type WaveformStatus,
+} from '@/components/subtitle/subtitleWorkspace';
 
 const isTauri = () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
-// ── Time helpers ────────────────────────────────────────────────────────────
-
-function srtTimeToMs(t: string): number {
-  const parts = t.replace(',', '.').split(':');
-  const secMs = parts[2].split('.');
-  return (
-    parseInt(parts[0]) * 3600000 +
-    parseInt(parts[1]) * 60000 +
-    parseInt(secMs[0]) * 1000 +
-    parseInt((secMs[1] || '0').padEnd(3, '0').slice(0, 3))
-  );
+interface ExitDirtyState {
+  subtitles: boolean;
+  glossary: boolean;
 }
 
-function msToSrtTime(ms: number): string {
-  const c = Math.max(0, Math.round(ms));
-  const h = Math.floor(c / 3600000);
-  const m = Math.floor((c % 3600000) / 60000);
-  const s = Math.floor((c % 60000) / 1000);
-  const mil = c % 1000;
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(mil).padStart(3, '0')}`;
+interface TranslationEntry extends SrtEntry {
+  translationNote: string;
 }
 
-function formatTimecode(ms: number): string {
-  const c = Math.max(0, ms);
-  const m = Math.floor(c / 60000);
-  const s = Math.floor((c % 60000) / 1000);
-  const cs = Math.floor((c % 1000) / 10);
-  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
-}
+type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
+type WorkspaceLayout = 'stacked' | 'side';
 
-function formatDuration(ms: number): string {
-  return `${(ms / 1000).toFixed(1)}s`;
-}
-
-// ── Glossary ─────────────────────────────────────────────────────────────────
-
-interface GlossaryEntry {
-  id: string;
-  original: string;
-  translation: string;
-  notes: string;
-}
-
-function GlossaryDialog({
-  rows,
-  onRowsChange,
-  onClose,
-}: {
-  rows: GlossaryEntry[];
-  onRowsChange: (rows: GlossaryEntry[]) => void;
-  onClose: () => void;
-}) {
-  const { t } = useI18n();
-  const tp = t.translationPage;
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const addRow = () => {
-    onRowsChange([...rows, { id: crypto.randomUUID(), original: '', translation: '', notes: '' }]);
-  };
-
-  const deleteRow = (id: string) => {
-    onRowsChange(rows.filter((r) => r.id !== id));
-  };
-
-  const updateRow = (id: string, field: keyof Omit<GlossaryEntry, 'id'>, value: string) => {
-    onRowsChange(rows.map((r) => (r.id === id ? { ...r, [field]: value } : r)));
-  };
-
-  const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    file.text().then((text) => {
-      const lines = text.replace(/\r\n/g, '\n').split('\n').filter((l) => l.trim());
-      // Skip header line if it looks like a known header (starts with tab-separated text)
-      const firstLine = lines[0] ?? '';
-      const hasHeader = firstLine.includes('\t') && !/^[\w\s]+$/.test(firstLine.split('\t')[0]);
-      // Heuristic: if the first cell isn't a "plain word" it's probably a header
-      const start = (firstLine.startsWith('原文\t') || firstLine.startsWith('Original\t')) ? 1 : 0;
-      const imported: GlossaryEntry[] = lines.slice(hasHeader ? (start > 0 ? start : 0) : start).map((line) => {
-        const parts = line.split('\t');
-        return {
-          id: crypto.randomUUID(),
-          original: parts[0] ?? '',
-          translation: parts[1] ?? '',
-          notes: parts[2] ?? '',
-        };
-      });
-      onRowsChange(imported);
-    });
-    e.target.value = '';
-  };
-
-  const handleExport = () => {
-    // Use i18n column names in the header so it round-trips in the same language
-    const header = `${tp.glossaryColOriginal}\t${tp.glossaryColTranslation}\t${tp.glossaryColNotes}`;
-    const body = rows.map((r) => `${r.original}\t${r.translation}\t${r.notes}`).join('\n');
-    const blob = new Blob([`${header}\n${body}`], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'glossary.txt';
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  // Close on Escape key
-  useEffect(() => {
-    const h = (e: globalThis.KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    document.addEventListener('keydown', h);
-    return () => document.removeEventListener('keydown', h);
-  }, [onClose]);
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-      onMouseDown={onClose}
-    >
-      <div
-        className="bg-card border border-border rounded-xl shadow-2xl w-[720px] max-w-[92vw] max-h-[80vh] flex flex-col"
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-border flex-shrink-0">
-          <BookOpen className="h-4 w-4 text-muted-foreground" />
-          <span className="font-semibold text-sm">{tp.glossaryTitle}</span>
-          <div className="flex-1" />
-          <input ref={fileInputRef} type="file" accept=".txt" className="sr-only" onChange={handleImport} />
-          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => fileInputRef.current?.click()}>
-            {tp.glossaryImport}
-          </Button>
-          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={handleExport} disabled={rows.length === 0}>
-            <Download className="h-3 w-3 mr-1" />{tp.glossaryExport}
-          </Button>
-          <Button size="sm" className="h-7 text-xs" onClick={addRow}>
-            <Plus className="h-3 w-3 mr-1" />{tp.glossaryAddRow}
-          </Button>
-          <button
-            type="button"
-            onClick={onClose}
-            className="ml-1 p-1 rounded hover:bg-muted transition-colors text-muted-foreground"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-
-        {/* Column headers */}
-        <div className="grid grid-cols-[1fr_1fr_1fr_32px] border-b border-border bg-muted/30 text-xs text-muted-foreground select-none flex-shrink-0">
-          <div className="px-3 py-2 font-medium border-r border-border/40">{tp.glossaryColOriginal}</div>
-          <div className="px-3 py-2 font-medium border-r border-border/40">{tp.glossaryColTranslation}</div>
-          <div className="px-3 py-2 font-medium border-r border-border/40">{tp.glossaryColNotes}</div>
-          <div />
-        </div>
-
-        {/* Rows */}
-        <div className="flex-1 overflow-y-auto">
-          {rows.length === 0 ? (
-            <div className="flex flex-col items-center justify-center gap-2 py-14 text-muted-foreground">
-              <BookOpen className="h-8 w-8 opacity-25" />
-              <p className="text-sm">{tp.glossaryEmpty}</p>
-            </div>
-          ) : (
-            rows.map((row) => (
-              <div
-                key={row.id}
-                className="grid grid-cols-[1fr_1fr_1fr_32px] border-b border-border/40 hover:bg-muted/10 group"
-              >
-                <input
-                  value={row.original}
-                  onChange={(e) => updateRow(row.id, 'original', e.target.value)}
-                  className="px-3 py-1.5 text-sm bg-transparent focus:outline-none focus:bg-muted/20 border-r border-border/30"
-                  placeholder={tp.glossaryPlaceholderOriginal}
-                />
-                <input
-                  value={row.translation}
-                  onChange={(e) => updateRow(row.id, 'translation', e.target.value)}
-                  className="px-3 py-1.5 text-sm bg-transparent focus:outline-none focus:bg-muted/20 border-r border-border/30"
-                  placeholder={tp.glossaryPlaceholderTranslation}
-                />
-                <input
-                  value={row.notes}
-                  onChange={(e) => updateRow(row.id, 'notes', e.target.value)}
-                  className="px-3 py-1.5 text-sm bg-transparent focus:outline-none focus:bg-muted/20 border-r border-border/30"
-                  placeholder={tp.glossaryPlaceholderNotes}
-                />
-                <button
-                  type="button"
-                  onClick={() => deleteRow(row.id)}
-                  className="flex items-center justify-center opacity-0 group-hover:opacity-40 hover:!opacity-100 hover:text-destructive transition-all"
-                  title={tp.glossaryDeleteRow}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            ))
-          )}
-        </div>
-
-        {/* Footer */}
-        <div className="flex items-center px-4 py-2 border-t border-border bg-muted/20 text-xs text-muted-foreground flex-shrink-0">
-          {tp.glossaryCount.replace('{count}', String(rows.length))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── SRT parser ──────────────────────────────────────────────────────────────
-
-/** Returns true if the string contains at least one CJK / Han character. */
-function hasCjk(s: string): boolean {
-  return /[\u4E00-\u9FFF\u3400-\u4DBF]/u.test(s);
-}
-
-/**
- * Split a multi-line body (lines after the timestamp) into originalText and translatedText.
- *
- * Rules:
- *  - If all lines lack CJK, everything is treated as original (no translation yet).
- *  - If some lines have CJK and some don't, CJK lines → translated, others → original.
- *  - If all lines have CJK, everything is treated as original (can't distinguish).
- *  - Translation may appear before OR after the original in the file.
- */
-function splitBilingual(bodyLines: string[]): { original: string; translated: string } {
-  const nonEmpty = bodyLines.filter((l) => l.trim() !== '');
-  if (nonEmpty.length === 0) return { original: '', translated: '' };
-  if (nonEmpty.length === 1) return { original: nonEmpty[0], translated: '' };
-
-  const origLines: string[] = [];
-  const transLines: string[] = [];
-  for (const line of nonEmpty) {
-    if (hasCjk(line)) transLines.push(line);
-    else origLines.push(line);
-  }
-
-  // Cannot distinguish (all CJK or no CJK): treat as original only
-  if (origLines.length === 0 || transLines.length === 0) {
-    return { original: nonEmpty.join('\n'), translated: '' };
-  }
-  return { original: origLines.join('\n'), translated: transLines.join('\n') };
-}
-
-function parseSrt(content: string): SrtEntry[] {
-  // Normalize all line endings to LF so the block-split regex works on CRLF files
-  const normalized = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  const blocks = normalized.trim().split(/\n{2,}/);
-  const entries: SrtEntry[] = [];
-  for (const block of blocks) {
-    const lines = block.trim().split('\n');
-    if (lines.length < 3) continue;
-    const index = parseInt(lines[0]);
-    const m = lines[1].match(
-      /(\d{2}:\d{2}:\d{2}[,.:]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.:]\d{3})/,
-    );
-    if (!m) continue;
-    const { original, translated } = splitBilingual(lines.slice(2));
-    entries.push({
-      index,
-      startMs: srtTimeToMs(m[1]),
-      endMs: srtTimeToMs(m[2]),
-      originalText: original,
-      translatedText: translated,
-    });
-  }
-  return entries;
-}
-
-function exportSrt(entries: SrtEntry[], mode: 'original' | 'translation' | 'bilingual'): string {
-  return entries
-    .map((e) => {
-      const text =
-        mode === 'original'
-          ? e.originalText
-          : mode === 'translation'
-          ? e.translatedText || e.originalText
-          : `${e.originalText}\n${e.translatedText || ''}`;
-      return `${e.index}\n${msToSrtTime(e.startMs)} --> ${msToSrtTime(e.endMs)}\n${text}`;
-    })
-    .join('\n\n');
-}
-
-function downloadText(content: string, filename: string) {
-  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-// ── Entry helpers ────────────────────────────────────────────────────────────
-
-function mergeEntries(entries: SrtEntry[], idx: number, dir: 'prev' | 'next'): SrtEntry[] {
-  const a = dir === 'prev' ? idx - 1 : idx;
-  const b = a + 1;
-  if (a < 0 || b >= entries.length) return entries;
-  const join = (x: string, y: string) =>
-    x.trimEnd() +
-    (!x.trimEnd().endsWith(' ') && !y.trimStart().startsWith(' ') ? ' ' : '') +
-    y.trimStart();
-  const merged: SrtEntry = {
-    index: entries[a].index,
-    startMs: entries[a].startMs,
-    endMs: entries[b].endMs,
-    originalText: join(entries[a].originalText, entries[b].originalText),
-    translatedText: join(entries[a].translatedText, entries[b].translatedText),
-  };
-  return [...entries.slice(0, a), merged, ...entries.slice(b + 1)].map((e, i) => ({
-    ...e,
-    index: i + 1,
+function toTranslationEntries(entries: SrtEntry[]): TranslationEntry[] {
+  return entries.map((entry) => ({
+    ...entry,
+    translationNote: (entry as Partial<TranslationEntry>).translationNote ?? '',
   }));
 }
 
-function insertEntry(entries: SrtEntry[], atMs: number): SrtEntry[] {
-  // Find the next entry that starts after the insertion point
-  const nextEntry = entries.find((e) => e.startMs > atMs);
-  // Cap end at min(2 s, nextEntry.startMs - 1 frame@30fps)
-  const maxEndMs = nextEntry ? nextEntry.startMs - 33 : atMs + 2000;
-  const endMs = Math.min(atMs + 2000, maxEndMs);
-  // Need at least 1 frame of duration; skip insert if gap is too small
-  if (endMs < atMs + 33) return entries;
-  const n: SrtEntry = { index: 0, startMs: atMs, endMs, originalText: '', translatedText: '' };
-  const i = entries.findIndex((e) => e.startMs > atMs);
-  const next = i >= 0 ? [...entries.slice(0, i), n, ...entries.slice(i)] : [...entries, n];
-  return next.map((e, j) => ({ ...e, index: j + 1 }));
+function hasTranslationNote(entry: TranslationEntry): boolean {
+  return entry.translationNote.trim() !== '';
 }
 
-function deleteEntry(entries: SrtEntry[], idx: number): SrtEntry[] {
-  return entries.filter((_, i) => i !== idx).map((e, i) => ({ ...e, index: i + 1 }));
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
-function autoResize(el: HTMLTextAreaElement | null) {
-  if (!el) return;
-  el.style.height = 'auto';
-  el.style.height = `${el.scrollHeight}px`;
+function textToHtml(s: string): string {
+  return escapeHtml(s || '').replace(/\n/g, '<br />');
 }
 
-// ── Types ────────────────────────────────────────────────────────────────────
+function buildTranslationNotesHtml(
+  entries: TranslationEntry[],
+  title: string,
+  emptyLabel: string,
+  labels: { time: string; original: string; translation: string; translationNote: string },
+): string {
+  const items = entries.filter(hasTranslationNote);
+  const rows = items.map((entry) => `
+    <article class="entry">
+      <div class="meta">#${entry.index} · ${msToSrtTime(entry.startMs)} - ${msToSrtTime(entry.endMs)}</div>
+      <section><h2>${escapeHtml(labels.original)}</h2><p>${textToHtml(entry.originalText)}</p></section>
+      <section><h2>${escapeHtml(labels.translation)}</h2><p>${textToHtml(entry.translatedText)}</p></section>
+      ${entry.translationNote.trim() ? `<section class="note"><h2>${escapeHtml(labels.translationNote)}</h2><p>${textToHtml(entry.translationNote)}</p></section>` : ''}
+    </article>
+  `).join('\n');
 
-type SubtitleMode = 'original' | 'translated' | 'both' | 'none';
-type FFmpegStatus = 'checking' | 'available' | 'not-found' | 'downloading';
-type WaveformStatus = 'idle' | 'loading' | 'ready' | 'error';
-
-const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
-
-// ── Drop zone ────────────────────────────────────────────────────────────────
-
-function DropZone({
-  label,
-  hint,
-  isOver,
-  isLoaded,
-  loadedName,
-  icon,
-  zoneRef,
-  onDragOver,
-  onDragLeave,
-  onDrop,
-  onBrowse,
-  onClear,
-}: {
-  label: string;
-  hint: string;
-  isOver: boolean;
-  isLoaded: boolean;
-  loadedName: string;
-  icon: React.ReactNode;
-  zoneRef?: React.RefObject<HTMLDivElement | null>;
-  onDragOver: (e: DragEvent) => void;
-  onDragLeave: () => void;
-  onDrop: (e: DragEvent) => void;
-  onBrowse: () => void;
-  onClear?: () => void;
-}) {
-  return (
-    <div
-      ref={zoneRef}
-      onDragOver={onDragOver}
-      onDragLeave={onDragLeave}
-      onDrop={onDrop}
-      onClick={onBrowse}
-      role="button"
-      tabIndex={0}
-      onKeyDown={(e) => { if (e.key === 'Enter') onBrowse(); }}
-      className={`flex flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed p-8 text-center transition-colors cursor-pointer select-none ${
-        isOver
-          ? 'border-primary bg-primary/10 text-primary'
-          : isLoaded
-          ? 'border-green-500/50 bg-green-500/5'
-          : 'border-border/60 text-muted-foreground hover:border-primary/50 hover:bg-primary/5'
-      }`}
-    >
-      {isLoaded ? (
-        <>
-          <CheckCircle2 className="h-8 w-8 text-green-500 shrink-0" />
-          <p className="text-sm font-medium text-foreground break-all px-2 leading-snug">{loadedName}</p>
-          {onClear && (
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); onClear(); }}
-              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-destructive transition-colors"
-            >
-              <X className="h-3 w-3" />
-              移除
-            </button>
-          )}
-        </>
-      ) : (
-        <>
-          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted">
-            {icon}
-          </div>
-          <div>
-            <p className="text-sm font-medium">{label}</p>
-            <p className="text-xs opacity-70 mt-1">{hint}</p>
-          </div>
-        </>
-      )}
-    </div>
-  );
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${escapeHtml(title)}</title>
+  <style>
+    body { margin: 0; background: #f6f7f9; color: #1f2933; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { max-width: 920px; margin: 0 auto; padding: 40px 24px 64px; }
+    h1 { margin: 0 0 20px; font-size: 28px; }
+    .entry { background: #fff; border: 1px solid #e4e7ec; border-radius: 8px; padding: 18px; margin: 14px 0; }
+    .meta { margin-bottom: 12px; color: #667085; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    h2 { margin: 0 0 6px; font-size: 12px; color: #475467; }
+    p { margin: 0 0 12px; line-height: 1.7; }
+    .note { border-left: 4px solid #f59e0b; padding: 12px; background: #fffbeb; border-radius: 6px; }
+    .empty { background: #fff; border: 1px dashed #c7cdd7; border-radius: 8px; padding: 24px; color: #667085; }
+  </style>
+</head>
+<body><main><h1>${escapeHtml(title)}</h1>${items.length > 0 ? rows : `<div class="empty">${escapeHtml(emptyLabel)}</div>`}</main></body>
+</html>`;
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
@@ -458,6 +125,7 @@ function DropZone({
 export default function TranslationPage() {
   const { t } = useI18n();
   const location = useLocation();
+  const navigate = useNavigate();
   const locationRef = useRef(location.pathname);
   useEffect(() => { locationRef.current = location.pathname; }, [location.pathname]);
 
@@ -465,9 +133,18 @@ export default function TranslationPage() {
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoFilePath, setVideoFilePath] = useState<string | null>(null); // Tauri 文件系统路径
-  const [srtEntries, setSrtEntries] = useState<SrtEntry[]>([]);
+  const [srtEntries, setSrtEntries] = useState<TranslationEntry[]>([]);
   const [srtFilename, setSrtFilename] = useState('');
+  const [srtFilePath, setSrtFilePath] = useState<string | null>(null);
   const [videoFilename, setVideoFilename] = useState('');
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
+  const [workspaceLayout, setWorkspaceLayout] = useState<WorkspaceLayout>(() => {
+    try {
+      return localStorage.getItem('qafone-subtitle-workspace-layout') === 'side' ? 'side' : 'stacked';
+    } catch {
+      return 'stacked';
+    }
+  });
 
   // Drop zone refs for Tauri position-based detection
   const videoZoneRef = useRef<HTMLDivElement>(null);
@@ -497,19 +174,22 @@ export default function TranslationPage() {
   const currentMs = currentTime * 1000;
   // Use strict less-than for endMs so boundary between adjacent entries resolves to the later entry
   const activeIdx = srtEntries.findIndex((e) => currentMs >= e.startMs && currentMs < e.endMs);
-  const tableRef = useRef<HTMLDivElement>(null);
   const rowRefs = useRef<(HTMLDivElement | null)[]>([]);
-  const textareaRefs = useRef<Map<string, HTMLTextAreaElement>>(new Map());
 
   // Table context menu
   const [tableMenu, setTableMenu] = useState<{ x: number; y: number; idx: number } | null>(null);
+  const tableMenuRef = useRef<HTMLDivElement>(null);
 
   // Glossary
   const [showGlossary, setShowGlossary] = useState(false);
 
   // Exit guard
   const [showExitDialog, setShowExitDialog] = useState(false);
-  const isDirtyRef = useRef(false);
+  const [exitDirtyState, setExitDirtyState] = useState<ExitDirtyState>({ subtitles: false, glossary: false });
+  const subtitleDirtyRef = useRef(false);
+  const glossaryDirtyRef = useRef(false);
+  const lastSavedContentRef = useRef('');
+  const saveTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
   const pendingCloseRef = useRef<(() => Promise<void>) | null>(null);
   const isForceClosingRef = useRef(false);
   const [glossaryRows, setGlossaryRows] = useState<GlossaryEntry[]>(() => {
@@ -527,6 +207,11 @@ export default function TranslationPage() {
     catch { /* quota */ }
   }, [glossaryRows]);
 
+  const handleGlossaryRowsChange = useCallback((rows: GlossaryEntry[]) => {
+    glossaryDirtyRef.current = true;
+    setGlossaryRows(rows);
+  }, []);
+
   // Tauri window close guard — show confirmation when there are unsaved subtitle entries
   useEffect(() => {
     if (!isTauri()) return;
@@ -535,51 +220,94 @@ export default function TranslationPage() {
       const { getCurrentWindow } = await import('@tauri-apps/api/window');
       const appWindow = getCurrentWindow();
       unlisten = await appWindow.onCloseRequested((event) => {
-        // Let native close proceed unless there are unsaved subtitle edits.
-        if (isForceClosingRef.current || !isDirtyRef.current) return;
+        const dirtyState = {
+          subtitles: subtitleDirtyRef.current,
+          glossary: glossaryDirtyRef.current,
+        };
+        if (isForceClosingRef.current || (!dirtyState.subtitles && !dirtyState.glossary)) return;
 
         event.preventDefault();
+        if (!claimCloseGuard('translation')) return;
+        navigate('/translation');
+        setExitDirtyState(dirtyState);
         pendingCloseRef.current = async () => {
           isForceClosingRef.current = true;
-          await appWindow.close();
+          await appWindow.destroy();
         };
         setShowExitDialog(true);
       });
     })();
     return () => { unlisten?.(); };
+  }, [navigate]);
+
+  const loadSrtContent = useCallback((content: string, filename: string, path: string | null, dirty = false) => {
+    const parsed = toTranslationEntries(parseSrt(content));
+    setSrtEntries(parsed);
+    setSrtFilename(filename);
+    setSrtFilePath(path);
+    setSaveStatus(path ? 'saved' : 'idle');
+    lastSavedContentRef.current = exportSrt(parsed, 'bilingual');
+    subtitleDirtyRef.current = dirty || !path;
   }, []);
 
-  // Auto-save
+  // Persist the in-memory translation workspace, including translation notes.
   useEffect(() => {
     if (srtEntries.length === 0) return;
     try { localStorage.setItem('qafone-translation-entries', JSON.stringify(srtEntries)); }
     catch { /* quota */ }
   }, [srtEntries]);
 
+  // Auto-save imported desktop subtitle files back to disk.
+  useEffect(() => {
+    if (!srtFilePath || srtEntries.length === 0) return;
+    const content = exportSrt(srtEntries, 'bilingual');
+    if (content === lastSavedContentRef.current) {
+      subtitleDirtyRef.current = false;
+      setSaveStatus('saved');
+      return;
+    }
+
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    subtitleDirtyRef.current = true;
+    setSaveStatus('saving');
+    saveTimerRef.current = window.setTimeout(() => {
+      invoke('save_text_file', { path: srtFilePath, content })
+        .then(() => {
+          lastSavedContentRef.current = content;
+          subtitleDirtyRef.current = false;
+          setSaveStatus('saved');
+        })
+        .catch((error) => {
+          console.error('Failed to autosave translation file:', error);
+          subtitleDirtyRef.current = true;
+          setSaveStatus('error');
+        });
+    }, 350);
+
+    return () => {
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    };
+  }, [srtEntries, srtFilePath]);
+
   // Load SRT from subtitle extraction page (via sessionStorage)
   useEffect(() => {
     const pending = sessionStorage.getItem('qafone-pending-srt');
     if (!pending) return;
     sessionStorage.removeItem('qafone-pending-srt');
-    const parsed = parseSrt(pending);
+    const parsed = toTranslationEntries(parseSrt(pending));
     if (parsed.length > 0) {
-      setSrtEntries(parsed);
-      setSrtFilename('subtitles.srt');
-      isDirtyRef.current = true;
+      const content = exportSrt(parsed, 'bilingual');
+      loadSrtContent(content, 'subtitles.srt', null, true);
+      subtitleDirtyRef.current = true;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loadSrtContent]);
 
   // Auto-scroll to active
   useEffect(() => {
     if (activeIdx < 0) return;
     rowRefs.current[activeIdx]?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }, [activeIdx]);
-
-  // Auto-resize all textareas when entries change (handles programmatic edits & merges)
-  useEffect(() => {
-    textareaRefs.current.forEach((el) => autoResize(el));
-  }, [srtEntries]);
 
   // Check FFmpeg
   useEffect(() => {
@@ -601,7 +329,6 @@ export default function TranslationPage() {
       .catch((err) => { setWaveformStatus('error'); setWaveformError(String(err)); });
   }, [videoFile, videoFilePath, ffmpegStatus, duration]);
 
-  // Spacebar shortcut
   const handlePlayPause = useCallback(() => {
     const v = videoRef.current;
     if (!v) return;
@@ -609,22 +336,17 @@ export default function TranslationPage() {
     else { v.pause(); setIsPlaying(false); }
   }, []);
 
-  useEffect(() => {
-    const h = (e: globalThis.KeyboardEvent) => {
-      const tag = (e.target as HTMLElement).tagName;
-      if (tag === 'TEXTAREA' || tag === 'INPUT') return;
-      if (e.code === 'Space') { e.preventDefault(); handlePlayPause(); }
-    };
-    document.addEventListener('keydown', h);
-    return () => document.removeEventListener('keydown', h);
-  }, [handlePlayPause]);
+  useSpacebarPlaybackShortcut(handlePlayPause, location.pathname === '/translation');
 
   // Table menu dismiss
   useEffect(() => {
     if (!tableMenu) return;
-    const d = () => setTableMenu(null);
-    document.addEventListener('click', d, { capture: true });
-    return () => document.removeEventListener('click', d, { capture: true });
+    const dismiss = (e: globalThis.MouseEvent) => {
+      if (tableMenuRef.current && tableMenuRef.current.contains(e.target as Node)) return;
+      setTableMenu(null);
+    };
+    document.addEventListener('mousedown', dismiss);
+    return () => document.removeEventListener('mousedown', dismiss);
   }, [tableMenu]);
 
   // Derived: subtitle overlay text
@@ -704,11 +426,8 @@ export default function TranslationPage() {
               try {
                 const url = convertFileSrc(filePath);
                 const text = await fetch(url).then((r) => r.text());
-                const parsed = parseSrt(text);
                 const name = filePath.replace(/\\/g, '/').split('/').pop() ?? filePath;
-                setSrtEntries(parsed);
-                setSrtFilename(name);
-                isDirtyRef.current = true;
+                loadSrtContent(text, name, filePath);
               } catch (e) {
                 console.error('Failed to read SRT:', e);
               }
@@ -759,12 +478,9 @@ export default function TranslationPage() {
     const file = e.dataTransfer.files[0];
     if (!file) return;
     file.text().then((text) => {
-      const parsed = parseSrt(text);
-      setSrtEntries(parsed);
-      setSrtFilename(file.name);
-      isDirtyRef.current = true;
+      loadSrtContent(text, file.name, null, false);
     });
-  }, []);
+  }, [loadSrtContent]);
 
   // 点击浏览——视频文件
   const handleBrowseVideo = useCallback(async () => {
@@ -806,11 +522,8 @@ export default function TranslationPage() {
         try {
           const url = convertFileSrc(path);
           const text = await fetch(url).then((r) => r.text());
-          const parsed = parseSrt(text);
           const name = path.replace(/\\/g, '/').split('/').pop() ?? path;
-          setSrtEntries(parsed);
-          setSrtFilename(name);
-          isDirtyRef.current = true;
+          loadSrtContent(text, name, path);
         } catch (e) {
           console.error('Failed to read SRT:', e);
         }
@@ -841,32 +554,75 @@ export default function TranslationPage() {
     const file = e.target.files?.[0];
     if (!file) return;
     file.text().then((text) => {
-      const parsed = parseSrt(text);
-      setSrtEntries(parsed);
-      setSrtFilename(file.name);
-      isDirtyRef.current = true;
+      loadSrtContent(text, file.name, null, false);
     });
-  }, []);
+  }, [loadSrtContent]);
 
   const handleOriginalChange = (idx: number, value: string) => {
-    isDirtyRef.current = true;
+    subtitleDirtyRef.current = true;
     setSrtEntries((prev) => prev.map((e, i) => (i === idx ? { ...e, originalText: value } : e)));
   };
 
   const handleTranslationChange = (idx: number, value: string) => {
-    isDirtyRef.current = true;
+    subtitleDirtyRef.current = true;
     setSrtEntries((prev) => prev.map((e, i) => (i === idx ? { ...e, translatedText: value } : e)));
   };
 
+  const handleTranslationNoteChange = (idx: number, value: string) => {
+    subtitleDirtyRef.current = true;
+    setSrtEntries((prev) => prev.map((e, i) => (i === idx ? { ...e, translationNote: value } : e)));
+  };
+
   const handleEntryUpdate = (idx: number, changes: Partial<Pick<SrtEntry, 'startMs' | 'endMs'>>) => {
-    isDirtyRef.current = true;
+    subtitleDirtyRef.current = true;
     setSrtEntries((prev) => prev.map((e, i) => (i === idx ? { ...e, ...changes } : e)));
   };
 
-  const handleInsertEntry = (startMs: number) => { isDirtyRef.current = true; setSrtEntries((p) => insertEntry(p, startMs)); };
-  const handleDeleteEntry = (idx: number) => { isDirtyRef.current = true; setSrtEntries((p) => deleteEntry(p, idx)); };
-  const handleMergeWithPrev = (idx: number) => { isDirtyRef.current = true; setSrtEntries((p) => mergeEntries(p, idx, 'prev')); };
-  const handleMergeWithNext = (idx: number) => { isDirtyRef.current = true; setSrtEntries((p) => mergeEntries(p, idx, 'next')); };
+  const createBlankTranslationEntry = (startMs: number, endMs: number): TranslationEntry => ({
+    index: 0,
+    startMs,
+    endMs,
+    originalText: '',
+    translatedText: '',
+    translationNote: '',
+  });
+
+  const handleInsertEntry = (startMs: number) => { subtitleDirtyRef.current = true; setSrtEntries((p) => insertSubtitleEntry(p, startMs, createBlankTranslationEntry)); };
+  const handleDeleteEntry = (idx: number) => { subtitleDirtyRef.current = true; setSrtEntries((p) => deleteSubtitleEntry(p, idx)); };
+  const handleMergeWithPrev = (idx: number) => { subtitleDirtyRef.current = true; setSrtEntries((p) => mergeSubtitleEntries(p, idx, 'prev', (left, right) => ({
+    translationNote: [left.translationNote, right.translationNote].filter((note) => note.trim()).join('\n'),
+  }))); };
+  const handleMergeWithNext = (idx: number) => { subtitleDirtyRef.current = true; setSrtEntries((p) => mergeSubtitleEntries(p, idx, 'next', (left, right) => ({
+    translationNote: [left.translationNote, right.translationNote].filter((note) => note.trim()).join('\n'),
+  }))); };
+  const handleInsertBlankBefore = (idx: number) => {
+    const next = insertBlankSubtitleEntry(srtEntries, idx, 'before', duration * 1000, createBlankTranslationEntry);
+    if (!next) {
+      window.alert(t.translationPage.insertBlankFailed);
+      return;
+    }
+    subtitleDirtyRef.current = true;
+    setSrtEntries(next);
+  };
+  const handleInsertBlankAfter = (idx: number) => {
+    const next = insertBlankSubtitleEntry(srtEntries, idx, 'after', duration * 1000, createBlankTranslationEntry);
+    if (!next) {
+      window.alert(t.translationPage.insertBlankFailed);
+      return;
+    }
+    subtitleDirtyRef.current = true;
+    setSrtEntries(next);
+  };
+  const handleSplitEntry = (idx: number) => {
+    subtitleDirtyRef.current = true;
+    setSrtEntries(splitSubtitleEntry(srtEntries, idx, (entry) => {
+      const noteSplit = splitSubtitleText(entry.translationNote);
+      return [
+        { translationNote: noteSplit.first },
+        { translationNote: noteSplit.didSplit ? noteSplit.second : '' },
+      ];
+    }));
+  };
 
   const handleDownloadFfmpeg = useCallback(() => {
     setFfmpegStatus('downloading');
@@ -888,55 +644,171 @@ export default function TranslationPage() {
   }, [videoUrl]);
 
   const clearSrt = useCallback(() => {
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     setSrtEntries([]);
     setSrtFilename('');
+    setSrtFilePath(null);
+    setSaveStatus('idle');
+    lastSavedContentRef.current = '';
+    subtitleDirtyRef.current = false;
   }, []);
 
   const hasVideo = !!videoUrl;
   const hasSrt = srtEntries.length > 0;
+  const exportableTranslationNoteCount = srtEntries.filter(hasTranslationNote).length;
+  const glossaryEntryCount = countGlossaryEntries(glossaryRows);
+  const subtitleModeLabel =
+    subtitleMode === 'both'
+      ? t.translationPage.subBoth
+      : subtitleMode === 'original'
+      ? t.translationPage.subOriginal
+      : subtitleMode === 'translated'
+      ? t.translationPage.subTranslated
+      : t.translationPage.subNone;
+  const cycleSubtitleMode = () => {
+    const modes: SubtitleMode[] = ['both', 'original', 'translated', 'none'];
+    setSubtitleMode((mode) => modes[(modes.indexOf(mode) + 1) % modes.length]);
+  };
+  const isSideLayout = workspaceLayout === 'side';
+  const toggleWorkspaceLayout = () => {
+    setWorkspaceLayout((layout) => {
+      const next = layout === 'side' ? 'stacked' : 'side';
+      try { localStorage.setItem('qafone-subtitle-workspace-layout', next); }
+      catch { /* storage unavailable */ }
+      return next;
+    });
+  };
+  const exitDialogMessage = exitDirtyState.subtitles && exitDirtyState.glossary
+    ? t.translationPage.exitDialogBothMessage
+    : exitDirtyState.glossary
+    ? t.translationPage.exitDialogGlossaryMessage
+    : t.translationPage.exitDialogMessage;
+  const exitDialogExportLabel = exitDirtyState.subtitles && exitDirtyState.glossary
+    ? t.translationPage.exitDialogExportBoth
+    : exitDirtyState.glossary
+    ? t.translationPage.exitDialogExportGlossary
+    : t.translationPage.exitDialogExport;
+  const handleExportAndClose = () => {
+    if (exitDirtyState.subtitles) {
+      downloadFile(exportSrt(srtEntries, 'bilingual'), `bilingual_${srtFilename || 'output.srt'}`);
+      subtitleDirtyRef.current = false;
+    }
+    if (exitDirtyState.glossary) {
+      downloadGlossary(glossaryRows, {
+        original: t.translationPage.glossaryColOriginal,
+        translation: t.translationPage.glossaryColTranslation,
+        notes: t.translationPage.glossaryColNotes,
+      });
+      glossaryDirtyRef.current = false;
+    }
+    setShowExitDialog(false);
+    pendingCloseRef.current?.();
+  };
+  const exportTranslationNotes = () => {
+    const html = buildTranslationNotesHtml(srtEntries, t.translationPage.translationNotesTitle, t.translationPage.translationNotesEmpty, {
+      time: t.translationPage.timecode,
+      original: t.translationPage.original,
+      translation: t.translationPage.translation,
+      translationNote: t.translationPage.translationNote,
+    });
+    downloadFile(html, 'translation-notes.html', 'text/html;charset=utf-8');
+  };
+  const translationColumns: SubtitleEditColumn<TranslationEntry>[] = [
+    {
+      id: 'original',
+      label: t.translationPage.original,
+      value: (entry) => entry.originalText,
+      onChange: handleOriginalChange,
+    },
+    {
+      id: 'translation',
+      label: t.translationPage.translation,
+      value: (entry) => entry.translatedText,
+      onChange: handleTranslationChange,
+      placeholder: t.translationPage.placeholder,
+    },
+    {
+      id: 'translation-note',
+      label: t.translationPage.translationNote,
+      value: (entry) => entry.translationNote,
+      onChange: handleTranslationNoteChange,
+      tone: 'note',
+    },
+  ];
+  const exitDialog = showExitDialog && (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60">
+      <div className="bg-card border border-border rounded-xl shadow-2xl w-[420px] max-w-[92vw] p-6 flex flex-col gap-4">
+        <div className="flex items-center gap-2">
+          <Download className="h-5 w-5 text-muted-foreground" />
+          <h2 className="font-semibold text-base">{t.translationPage.exitDialogTitle}</h2>
+        </div>
+        <p className="text-sm text-muted-foreground leading-relaxed">{exitDialogMessage}</p>
+        <div className="flex flex-col gap-2 pt-1">
+          <Button className="justify-center" onClick={handleExportAndClose}>
+            <Download className="h-4 w-4 mr-2" />{exitDialogExportLabel}
+          </Button>
+          <Button
+            variant="destructive"
+            className="justify-center"
+            onClick={() => {
+              subtitleDirtyRef.current = false;
+              glossaryDirtyRef.current = false;
+              setShowExitDialog(false);
+              pendingCloseRef.current?.();
+            }}
+          >
+            {t.translationPage.exitDialogDiscard}
+          </Button>
+          <Button
+            variant="outline"
+            className="justify-center"
+            onClick={() => {
+              pendingCloseRef.current = null;
+              releaseCloseGuard('translation');
+              setShowExitDialog(false);
+            }}
+          >
+            {t.translationPage.exitDialogCancel}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
 
   // ── Drop zone view ────────────────────────────────────────────────────────
   if (!hasVideo || !hasSrt) {
     return (
-      <div className="flex flex-col h-full p-6 gap-6">
-        <div>
-          <h1 className="text-xl font-bold">{t.translationPage.title}</h1>
-          <p className="text-sm text-muted-foreground mt-1">{t.translationPage.subtitle}</p>
-        </div>
-        <div className="grid grid-cols-2 gap-4 flex-1 content-start">
-          {/* hidden file inputs for browser mode */}
-          <input ref={videoInputRef} type="file" accept="video/*,.mkv,.mp4,.mov,.avi,.ts,.wmv" className="sr-only" onChange={handleVideoFileChange} />
-          <input ref={srtInputRef} type="file" accept=".srt,.vtt" className="sr-only" onChange={handleSrtFileChange} />
-          <DropZone
-            label={t.translationPage.dropVideoHere}
-            hint={t.translationPage.dropVideoHint}
-            isOver={videoDragOver}
-            isLoaded={!!videoFilename}
-            loadedName={videoFilename}
-            icon={<Film className="h-6 w-6 text-muted-foreground" />}
-            zoneRef={videoZoneRef}
-            onDragOver={(e) => { e.preventDefault(); if (!isTauri()) setVideoDragOver(true); }}
-            onDragLeave={() => { if (!isTauri()) setVideoDragOver(false); }}
-            onDrop={handleVideoDrop}
-            onBrowse={handleBrowseVideo}
-            onClear={videoFilename ? clearVideo : undefined}
-          />
-          <DropZone
-            label={t.translationPage.dropSrtHere}
-            hint={t.translationPage.dropSrtHint}
-            isOver={srtDragOver}
-            isLoaded={!!srtFilename}
-            loadedName={srtFilename}
-            icon={<FileText className="h-6 w-6 text-muted-foreground" />}
-            zoneRef={srtZoneRef}
-            onDragOver={(e) => { e.preventDefault(); if (!isTauri()) setSrtDragOver(true); }}
-            onDragLeave={() => { if (!isTauri()) setSrtDragOver(false); }}
-            onDrop={handleSrtDrop}
-            onBrowse={handleBrowseSrt}
-            onClear={srtFilename ? clearSrt : undefined}
-          />
-        </div>
-      </div>
+      <SubtitleImportView
+        title={t.translationPage.title}
+        subtitle={t.translationPage.subtitle}
+        videoLabel={t.translationPage.dropVideoHere}
+        videoHint={t.translationPage.dropVideoHint}
+        srtLabel={t.translationPage.dropSrtHere}
+        srtHint={t.translationPage.dropSrtHint}
+        browseLabel={t.translationPage.browseFile}
+        videoInputRef={videoInputRef}
+        srtInputRef={srtInputRef}
+        videoZoneRef={videoZoneRef}
+        srtZoneRef={srtZoneRef}
+        videoDragOver={videoDragOver}
+        srtDragOver={srtDragOver}
+        videoFilename={videoFilename}
+        srtFilename={srtFilename}
+        onVideoInputChange={handleVideoFileChange}
+        onSrtInputChange={handleSrtFileChange}
+        onVideoDragOver={(e) => { e.preventDefault(); if (!isTauri()) setVideoDragOver(true); }}
+        onSrtDragOver={(e) => { e.preventDefault(); if (!isTauri()) setSrtDragOver(true); }}
+        onVideoDragLeave={() => { if (!isTauri()) setVideoDragOver(false); }}
+        onSrtDragLeave={() => { if (!isTauri()) setSrtDragOver(false); }}
+        onVideoDrop={handleVideoDrop}
+        onSrtDrop={handleSrtDrop}
+        onBrowseVideo={handleBrowseVideo}
+        onBrowseSrt={handleBrowseSrt}
+        onClearVideo={clearVideo}
+        onClearSrt={clearSrt}
+      >
+        {exitDialog}
+      </SubtitleImportView>
     );
   }
 
@@ -970,28 +842,49 @@ export default function TranslationPage() {
               >
                 <X className="h-3 w-3" />
               </button>
+              <span className="ml-2 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                {srtFilePath
+                  ? saveStatus === 'saving'
+                    ? t.translationPage.autosaveSaving
+                    : saveStatus === 'error'
+                    ? t.translationPage.autosaveError
+                    : t.translationPage.autosaveSaved
+                  : t.translationPage.autosaveBrowser}
+              </span>
             </>
           )}
         </div>
         <div className="flex-1" />
+        <Button size="sm" variant="outline" className="h-7 text-xs" onClick={toggleWorkspaceLayout}>
+          {isSideLayout ? <Rows3 className="h-3 w-3 mr-1" /> : <Columns2 className="h-3 w-3 mr-1" />}
+          {isSideLayout ? t.translationPage.layoutStacked : t.translationPage.layoutSideBySide}
+        </Button>
         <Button size="sm" variant="outline" className="h-7 text-xs"
-          onClick={() => { downloadText(exportSrt(srtEntries, 'original'), `original_${srtFilename || 'output.srt'}`); isDirtyRef.current = false; }}>
+          onClick={() => { downloadFile(exportSrt(srtEntries, 'original'), `original_${srtFilename || 'output.srt'}`); subtitleDirtyRef.current = false; }}>
           <Download className="h-3 w-3 mr-1" />{t.translationPage.exportOriginal}
         </Button>
         <Button size="sm" variant="outline" className="h-7 text-xs"
-          onClick={() => { downloadText(exportSrt(srtEntries, 'translation'), `translated_${srtFilename || 'output.srt'}`); isDirtyRef.current = false; }}>
+          onClick={() => { downloadFile(exportSrt(srtEntries, 'translation'), `translated_${srtFilename || 'output.srt'}`); subtitleDirtyRef.current = false; }}>
           <Download className="h-3 w-3 mr-1" />{t.translationPage.exportTranslation}
         </Button>
         <Button size="sm" variant="outline" className="h-7 text-xs"
-          onClick={() => { downloadText(exportSrt(srtEntries, 'bilingual'), `bilingual_${srtFilename || 'output.srt'}`); isDirtyRef.current = false; }}>
+          onClick={() => { downloadFile(exportSrt(srtEntries, 'bilingual'), `bilingual_${srtFilename || 'output.srt'}`); subtitleDirtyRef.current = false; }}>
           <Download className="h-3 w-3 mr-1" />{t.translationPage.exportBilingual}
+        </Button>
+        <Button size="sm" variant="outline" className="h-7 text-xs" onClick={exportTranslationNotes} disabled={exportableTranslationNoteCount === 0}>
+          <Download className="h-3 w-3 mr-1" />{t.translationPage.exportTranslationNotes}
+          {exportableTranslationNoteCount > 0 && (
+            <span className="ml-1 text-[10px] bg-primary/20 text-primary rounded-full px-1.5 py-0.5 font-mono leading-none">
+              {exportableTranslationNoteCount}
+            </span>
+          )}
         </Button>
         <div className="w-px h-4 bg-border/60 mx-1 shrink-0" />
         <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setShowGlossary(true)}>
           <BookOpen className="h-3 w-3 mr-1" />{t.translationPage.glossaryButton}
-          {glossaryRows.length > 0 && (
+          {glossaryEntryCount > 0 && (
             <span className="ml-1 text-[10px] bg-primary/20 text-primary rounded-full px-1.5 py-0.5 font-mono leading-none">
-              {glossaryRows.length}
+              {glossaryEntryCount}
             </span>
           )}
         </Button>
@@ -1001,277 +894,92 @@ export default function TranslationPage() {
       {showGlossary && (
         <GlossaryDialog
           rows={glossaryRows}
-          onRowsChange={setGlossaryRows}
+          onRowsChange={handleGlossaryRowsChange}
+          onExported={() => { glossaryDirtyRef.current = false; }}
           onClose={() => setShowGlossary(false)}
         />
       )}
 
-      {/* ── Video area ──────────────────────────────────────────────────── */}
-      <div className="relative bg-black flex-shrink-0" style={{ maxHeight: '40vh' }}>
-        <video
-          ref={videoRef}
-          src={videoUrl!}
-          className="w-full object-contain"
-          style={{ maxHeight: '40vh' }}
-          onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
-          onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
-          onPlay={() => setIsPlaying(true)}
-          onPause={() => setIsPlaying(false)}
-        />
-        {/* Subtitle overlay */}
-        {overlayLines.length > 0 && (
-          <div
-            className="absolute left-1/2 -translate-x-1/2 text-center pointer-events-none flex flex-col items-center gap-0.5"
-            style={{ bottom: `${subtitleOffsetPct}%` }}
+      <div className={isSideLayout ? 'flex min-h-0 flex-1 flex-col lg:grid lg:grid-cols-[minmax(360px,0.9fr)_minmax(520px,1.1fr)] lg:overflow-hidden' : 'flex min-h-0 flex-1 flex-col'}>
+        <div className={isSideLayout ? 'flex-shrink-0 lg:flex lg:min-h-0 lg:h-full lg:flex-col lg:overflow-hidden lg:border-r lg:border-border/60' : 'flex-shrink-0'}>
+          <SubtitleVideoPreview
+            videoRef={videoRef}
+            videoUrl={videoUrl}
+            overlayLines={overlayLines}
+            overlayBottomPct={subtitleOffsetPct}
+            fill={isSideLayout}
+            onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+            onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+            onPlay={() => setIsPlaying(true)}
+            onPause={() => setIsPlaying(false)}
+          />
+
+          <PlaybackControls
+            currentTime={currentTime}
+            duration={duration}
+            isPlaying={isPlaying}
+            speedLabel={`${SPEEDS[speedIdx]}×`}
+            subtitleMode={subtitleMode}
+            subtitleModeLabel={subtitleModeLabel}
+            onSeekBy={seek}
+            onTogglePlay={handlePlayPause}
+            onSeek={handleSeek}
+            onCycleSpeed={cycleSpeed}
+            onCycleSubtitleMode={cycleSubtitleMode}
           >
-            {overlayLines.map((line, i) => (
-              <span key={i} className="bg-black/75 text-white text-sm px-2 py-0.5 rounded">
-                {line}
-              </span>
-            ))}
-          </div>
-        )}
-      </div>
+            <SubtitleOffsetControls
+              label={t.translationPage.subtitleOffset}
+              upLabel={t.translationPage.subtitleUp}
+              downLabel={t.translationPage.subtitleDown}
+              value={subtitleOffsetPct}
+              onChange={setSubtitleOffsetPct}
+            />
+          </PlaybackControls>
 
-      {/* ── Controls bar ────────────────────────────────────────────────── */}
-      <div className="flex items-center gap-1 px-3 py-1.5 border-b border-border/60 bg-card/30 flex-shrink-0 flex-wrap">
-        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => seek(-5)}>
-          <SkipBack className="h-3.5 w-3.5" />
-        </Button>
-        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={handlePlayPause}>
-          {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-        </Button>
-        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => seek(5)}>
-          <SkipForward className="h-3.5 w-3.5" />
-        </Button>
-        <span className="text-xs font-mono text-muted-foreground mx-1 shrink-0">
-          {formatTimecode(currentMs)} / {formatTimecode(duration * 1000)}
-        </span>
-
-        {/* Time scrubber */}
-        <input
-          type="range"
-          min={0}
-          max={duration || 1}
-          step={0.05}
-          value={currentTime}
-          onChange={(e) => handleSeek(parseFloat(e.target.value))}
-          className="flex-1 h-1 cursor-pointer accent-primary min-w-[60px]"
-          style={{ minWidth: 60 }}
-        />
-
-        {/* Speed */}
-        <Button variant="ghost" size="sm" className="h-7 text-xs font-mono px-2 shrink-0" onClick={cycleSpeed}>
-          {SPEEDS[speedIdx]}×
-        </Button>
-
-        {/* Subtitle mode cycle */}
-        <Button
-          variant="ghost" size="sm" className="h-7 text-xs px-2"
-          onClick={() => {
-            const modes: SubtitleMode[] = ['both', 'original', 'translated', 'none'];
-            setSubtitleMode((m) => modes[(modes.indexOf(m) + 1) % modes.length]);
-          }}
-        >
-          {subtitleMode === 'both' && t.translationPage.subBoth}
-          {subtitleMode === 'original' && t.translationPage.subOriginal}
-          {subtitleMode === 'translated' && t.translationPage.subTranslated}
-          {subtitleMode === 'none' && t.translationPage.subNone}
-        </Button>
-
-        {/* Subtitle position */}
-        <div className="flex items-center gap-0.5 ml-1">
-          <span className="text-xs text-muted-foreground hidden sm:inline mr-1">{t.translationPage.subtitleOffset}</span>
-          <Button variant="ghost" size="icon" className="h-6 w-6" title={t.translationPage.subtitleUp}
-            onClick={() => setSubtitleOffsetPct((p) => Math.min(90, p + 5))}>
-            <ChevronUp className="h-3.5 w-3.5" />
-          </Button>
-          <span className="text-xs font-mono text-muted-foreground w-7 text-center">{subtitleOffsetPct}%</span>
-          <Button variant="ghost" size="icon" className="h-6 w-6" title={t.translationPage.subtitleDown}
-            onClick={() => setSubtitleOffsetPct((p) => Math.max(2, p - 5))}>
-            <ChevronDown className="h-3.5 w-3.5" />
-          </Button>
+          <WaveformDisplay
+            peaks={peaks}
+            duration={duration}
+            currentTime={currentTime}
+            srtEntries={srtEntries}
+            ffmpegStatus={ffmpegStatus}
+            waveformStatus={waveformStatus}
+            waveformError={waveformError}
+            onSeek={handleSeek}
+            onEntryUpdate={handleEntryUpdate}
+            onInsertEntry={handleInsertEntry}
+            onDeleteEntry={handleDeleteEntry}
+            onMergeWithPrev={handleMergeWithPrev}
+            onMergeWithNext={handleMergeWithNext}
+            onInsertBlankBefore={handleInsertBlankBefore}
+            onInsertBlankAfter={handleInsertBlankAfter}
+            onSplitEntry={handleSplitEntry}
+            onDownloadFfmpeg={handleDownloadFfmpeg}
+          />
         </div>
-      </div>
 
-      {/* ── Waveform ─────────────────────────────────────────────────────── */}
-      <div className="flex-shrink-0">
-        <WaveformDisplay
-          peaks={peaks}
-          duration={duration}
-          currentTime={currentTime}
-          srtEntries={srtEntries}
-          ffmpegStatus={ffmpegStatus}
-          waveformStatus={waveformStatus}
-          waveformError={waveformError}
-          onSeek={handleSeek}
-          onEntryUpdate={handleEntryUpdate}
-          onInsertEntry={handleInsertEntry}
-          onDeleteEntry={handleDeleteEntry}
-          onMergeWithPrev={handleMergeWithPrev}
-          onMergeWithNext={handleMergeWithNext}
-          onDownloadFfmpeg={handleDownloadFfmpeg}
-        />
-      </div>
-
-      {/* ── Translation table ─────────────────────────────────────────────── */}
-      <div ref={tableRef} className="flex-1 overflow-y-auto">
-        {srtEntries.map((entry, idx) => {
-          const isActive = idx === activeIdx;
-          return (
-            <div
-              key={entry.index}
-              ref={(el) => { rowRefs.current[idx] = el; }}
-              className={`relative border-b border-border/40 transition-colors ${
-                isActive ? 'bg-primary/5 border-l-2 border-l-primary' : 'hover:bg-muted/20'
-              }`}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                setTableMenu({ x: e.clientX - rect.left, y: e.clientY - rect.top, idx });
-              }}
-            >
-              {/* Timecode header */}
-              <div className="flex items-center gap-2 px-3 pt-2 pb-1 text-xs text-muted-foreground select-none">
-                <span className={`font-semibold ${isActive ? 'text-primary' : 'text-muted-foreground/50'}`}>
-                  #{entry.index}
-                </span>
-                <span className="font-mono">{msToSrtTime(entry.startMs)}</span>
-                <span className="opacity-40">→</span>
-                <span className="font-mono">{msToSrtTime(entry.endMs)}</span>
-                <span className="text-muted-foreground/50">({formatDuration(entry.endMs - entry.startMs)})</span>
-                <div className="flex-1" />
-                <button
-                  className="p-0.5 rounded hover:bg-accent opacity-40 hover:opacity-100 transition-opacity"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                    const parentRect = (e.currentTarget as HTMLElement)
-                      .closest('.relative')?.getBoundingClientRect() ?? rect;
-                    setTableMenu({
-                      x: rect.right - parentRect.left - 164,
-                      y: rect.bottom - parentRect.top + 2,
-                      idx,
-                    });
-                  }}
-                >
-                  <MoreVertical className="h-3 w-3" />
-                </button>
-              </div>
-
-              {/* Two-column edit */}
-              <div className="flex">
-                <textarea
-                  ref={(el) => {
-                    const key = `orig-${idx}`;
-                    if (el) textareaRefs.current.set(key, el);
-                    else textareaRefs.current.delete(key);
-                    autoResize(el);
-                  }}
-                  rows={1}
-                  value={entry.originalText}
-                  onChange={(e) => { handleOriginalChange(idx, e.target.value); autoResize(e.currentTarget); }}
-                  onFocus={() => {
-                    const ms = currentTime * 1000;
-                    if (ms < entry.startMs || ms >= entry.endMs) handleSeek(entry.startMs / 1000);
-                  }}
-                  className="flex-1 resize-none bg-transparent px-3 py-1.5 text-sm text-foreground/80 focus:outline-none focus:bg-muted/10 transition-colors border-r border-border/30 overflow-hidden"
-                  onKeyDown={(e: KeyboardEvent) => e.stopPropagation()}
-                />
-                <textarea
-                  ref={(el) => {
-                    const key = `trans-${idx}`;
-                    if (el) textareaRefs.current.set(key, el);
-                    else textareaRefs.current.delete(key);
-                    autoResize(el);
-                  }}
-                  rows={1}
-                  value={entry.translatedText}
-                  onChange={(e) => { handleTranslationChange(idx, e.target.value); autoResize(e.currentTarget); }}
-                  onFocus={() => {
-                    const ms = currentTime * 1000;
-                    if (ms < entry.startMs || ms >= entry.endMs) handleSeek(entry.startMs / 1000);
-                  }}
-                  placeholder={t.translationPage.placeholder}
-                  className="flex-1 resize-none bg-transparent px-3 py-1.5 text-sm focus:outline-none focus:bg-muted/10 transition-colors overflow-hidden"
-                  onKeyDown={(e: KeyboardEvent) => e.stopPropagation()}
-                />
-              </div>
-
-              {/* Row context menu */}
-              {tableMenu?.idx === idx && (
-                <div
-                  className="absolute z-50 min-w-[160px] bg-card border border-border rounded-md shadow-lg py-1 text-sm"
-                  style={{ left: tableMenu.x, top: tableMenu.y }}
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <button className="w-full text-left px-3 py-1.5 hover:bg-accent transition-colors"
-                    onClick={() => { handleMergeWithPrev(idx); setTableMenu(null); }}>
-                    {t.translationPage.mergePrev}
-                  </button>
-                  <button className="w-full text-left px-3 py-1.5 hover:bg-accent transition-colors"
-                    onClick={() => { handleMergeWithNext(idx); setTableMenu(null); }}>
-                    {t.translationPage.mergeNext}
-                  </button>
-                  <div className="my-1 h-px bg-border" />
-                  <button
-                    className="w-full text-left px-3 py-1.5 hover:bg-destructive/10 text-destructive transition-colors"
-                    onClick={() => { handleDeleteEntry(idx); setTableMenu(null); }}>
-                    {t.translationPage.deleteSubtitle}
-                  </button>
-                </div>
-              )}
-            </div>
-          );
-        })}
+        <div className="flex min-h-0 flex-1 flex-col">
+          <SubtitleEditTable
+            entries={srtEntries}
+            activeIdx={activeIdx}
+            columns={translationColumns}
+            gridTemplateColumns="minmax(220px,1fr) minmax(220px,1fr) minmax(220px,0.9fr)"
+            tableMenu={tableMenu}
+            tableMenuRef={tableMenuRef}
+            rowRefs={rowRefs}
+            onSetTableMenu={setTableMenu}
+            onSeek={handleSeek}
+            onMergeWithPrev={handleMergeWithPrev}
+            onMergeWithNext={handleMergeWithNext}
+            onInsertBefore={handleInsertBlankBefore}
+            onInsertAfter={handleInsertBlankAfter}
+            onSplit={handleSplitEntry}
+            onDelete={handleDeleteEntry}
+          />
+        </div>
       </div>
 
       {/* ── Exit confirmation dialog ─────────────────────────────────────────────── */}
-      {showExitDialog && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60">
-          <div className="bg-card border border-border rounded-xl shadow-2xl w-[420px] max-w-[92vw] p-6 flex flex-col gap-4">
-            <div className="flex items-center gap-2">
-              <Download className="h-5 w-5 text-muted-foreground" />
-              <h2 className="font-semibold text-base">{t.translationPage.exitDialogTitle}</h2>
-            </div>
-            <p className="text-sm text-muted-foreground leading-relaxed">{t.translationPage.exitDialogMessage}</p>
-            <div className="flex flex-col gap-2 pt-1">
-              <Button
-                className="justify-center"
-                onClick={() => {
-                  downloadText(exportSrt(srtEntries, 'bilingual'), `bilingual_${srtFilename || 'output.srt'}`);
-                  isDirtyRef.current = false;
-                  setShowExitDialog(false);
-                  pendingCloseRef.current?.();
-                }}
-              >
-                <Download className="h-4 w-4 mr-2" />{t.translationPage.exitDialogExport}
-              </Button>
-              <Button
-                variant="destructive"
-                className="justify-center"
-                onClick={() => {
-                  isDirtyRef.current = false;
-                  setShowExitDialog(false);
-                  pendingCloseRef.current?.();
-                }}
-              >
-                {t.translationPage.exitDialogDiscard}
-              </Button>
-              <Button
-                variant="outline"
-                className="justify-center"
-                onClick={() => {
-                  pendingCloseRef.current = null;
-                  setShowExitDialog(false);
-                }}
-              >
-                {t.translationPage.exitDialogCancel}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
+      {exitDialog}
     </div>
   );
 }

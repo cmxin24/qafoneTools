@@ -1,6 +1,6 @@
 import { useI18n } from '@/i18n';
 import { MessageCircle, ExternalLink } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { cn } from '@/components/ui/utils';
 
 const GITHUB_URL = 'https://github.com/cmxin24/qafoneTools';
 function GitHubIcon({ className }: { className?: string }) {

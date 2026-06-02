@@ -2,7 +2,7 @@ import { useNavigate } from 'react-router-dom';
 import { useI18n } from '@/i18n';
 import type { Translations } from '@/i18n/en';
 import { SplitSquareHorizontal, FileCode2, Users, Sparkles, Type } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { cn } from '@/components/ui/utils';
 
 interface ToolCard {
   titleKey: keyof Translations['effectsPage'];

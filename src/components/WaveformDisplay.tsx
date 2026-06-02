@@ -8,6 +8,7 @@ import {
 import { useI18n } from '@/i18n';
 import { Button } from '@/components/ui/button';
 import { ZoomIn, ZoomOut, Download } from 'lucide-react';
+import { SubtitleEntryContextMenu } from '@/components/subtitle/SubtitleEntryContextMenu';
 
 export interface SrtEntry {
   index: number;
@@ -44,6 +45,9 @@ interface Props {
   onDeleteEntry: (idx: number) => void;
   onMergeWithPrev: (idx: number) => void;
   onMergeWithNext: (idx: number) => void;
+  onInsertBlankBefore: (idx: number) => void;
+  onInsertBlankAfter: (idx: number) => void;
+  onSplitEntry: (idx: number) => void;
   onDownloadFfmpeg: () => void;
 }
 
@@ -65,6 +69,9 @@ export function WaveformDisplay({
   onDeleteEntry,
   onMergeWithPrev,
   onMergeWithNext,
+  onInsertBlankBefore,
+  onInsertBlankAfter,
+  onSplitEntry,
   onDownloadFfmpeg,
 }: Props) {
   const { t } = useI18n();
@@ -609,7 +616,7 @@ export function WaveformDisplay({
         )}
 
         {/* Context menu — rendered with position:fixed so it escapes overflow:hidden clipping */}
-        {contextMenu && (
+        {contextMenu?.type === 'empty' && (
           <div
             ref={menuRef}
             className="fixed z-50 min-w-[160px] bg-card border border-border rounded-md shadow-lg py-1 text-sm"
@@ -618,43 +625,32 @@ export function WaveformDisplay({
               top: Math.min(contextMenu.y, window.innerHeight - 140),
             }}
           >
-            {contextMenu.type === 'empty' && (
-              <button
-                className="w-full text-left px-3 py-1.5 hover:bg-accent transition-colors"
-                onClick={() => {
-                  onInsertEntry(contextMenu.timeMs!);
-                  // Seek to the inserted position so the table auto-scrolls to it
-                  onSeek(contextMenu.timeMs! / 1000);
-                  setContextMenu(null);
-                }}
-              >
-                {t.translationPage.insertSubtitle}
-              </button>
-            )}
-            {contextMenu.type === 'entry' && (
-              <>
-                <button
-                  className="w-full text-left px-3 py-1.5 hover:bg-accent transition-colors"
-                  onClick={() => { onMergeWithPrev(contextMenu.entryIdx!); setContextMenu(null); }}
-                >
-                  {t.translationPage.mergePrev}
-                </button>
-                <button
-                  className="w-full text-left px-3 py-1.5 hover:bg-accent transition-colors"
-                  onClick={() => { onMergeWithNext(contextMenu.entryIdx!); setContextMenu(null); }}
-                >
-                  {t.translationPage.mergeNext}
-                </button>
-                <div className="my-1 h-px bg-border" />
-                <button
-                  className="w-full text-left px-3 py-1.5 hover:bg-destructive/10 text-destructive transition-colors"
-                  onClick={() => { onDeleteEntry(contextMenu.entryIdx!); setContextMenu(null); }}
-                >
-                  {t.translationPage.deleteSubtitle}
-                </button>
-              </>
-            )}
+            <button
+              className="w-full text-left px-3 py-1.5 hover:bg-accent transition-colors"
+              onClick={() => {
+                onInsertEntry(contextMenu.timeMs!);
+                // Seek to the inserted position so the table auto-scrolls to it
+                onSeek(contextMenu.timeMs! / 1000);
+                setContextMenu(null);
+              }}
+            >
+              {t.translationPage.insertSubtitle}
+            </button>
           </div>
+        )}
+        {contextMenu?.type === 'entry' && (
+          <SubtitleEntryContextMenu
+            ref={menuRef}
+            x={contextMenu.x}
+            y={contextMenu.y}
+            onMergeWithPrev={() => onMergeWithPrev(contextMenu.entryIdx!)}
+            onMergeWithNext={() => onMergeWithNext(contextMenu.entryIdx!)}
+            onInsertBefore={() => onInsertBlankBefore(contextMenu.entryIdx!)}
+            onInsertAfter={() => onInsertBlankAfter(contextMenu.entryIdx!)}
+            onSplit={() => onSplitEntry(contextMenu.entryIdx!)}
+            onDelete={() => onDeleteEntry(contextMenu.entryIdx!)}
+            onClose={() => setContextMenu(null)}
+          />
         )}
       </div>
 

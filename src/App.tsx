@@ -1,7 +1,6 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { Layout } from '@/components/layout/Layout';
 import TimelinePage from '@/pages/Timeline';
-import ProofreadingPage from '@/pages/Proofreading';
 import SecondaryTimelinePage from '@/pages/SecondaryTimeline';
 import EffectsPage from '@/pages/Effects';
 import EncodingPage from '@/pages/Encoding';
@@ -32,7 +31,7 @@ export default function App() {
           <Route path="/preprocessing" element={<PreprocessingPage />} />
           <Route path="/translation" element={<></>} />
           <Route path="/timeline" element={<TimelinePage />} />
-          <Route path="/proofreading" element={<ProofreadingPage />} />
+          <Route path="/proofreading" element={<></>} />
           <Route path="/secondary-timeline" element={<SecondaryTimelinePage />} />
           <Route path="/effects" element={<EffectsPage />} />
           <Route path="/effects/bilingual-separator" element={<BilingualSeparatorPage />} />

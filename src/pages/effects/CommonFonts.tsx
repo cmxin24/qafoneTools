@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useI18n } from '@/i18n';
 import { Button } from '@/components/ui/button';
-import { cn } from '@/lib/utils';
+import { cn } from '@/components/ui/utils';
 import { ArrowLeft, Type, CheckCircle2, XCircle, Loader2, Download, FolderOpen, RefreshCw } from 'lucide-react';
 
 // ─── Runtime environment check ─────────────────────────────────────────────────

@@ -8,7 +8,7 @@ import {
   SelectItem,
   SelectTrigger,
 } from '@/components/ui/select';
-import { cn } from '@/lib/utils';
+import { cn } from '@/components/ui/utils';
 import { ArrowLeft, Film, FileCode2, Wand2, Copy, Check, FolderOpen } from 'lucide-react';
 
 // ─── Runtime environment check ─────────────────────────────────────────────────
