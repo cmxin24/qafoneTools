@@ -69,6 +69,21 @@ npm run tauri:build
 
 产物位于 `src-tauri/target/release/bundle/`。
 
+### GitHub Release
+
+项目已配置 GitHub Actions 自动构建 macOS 与 Windows 安装包。发布新版本时：
+
+1. 确认版本号已更新：`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`package.json`。
+2. 提交并推送代码。
+3. 在 GitHub 的 Actions 页面手动运行 `Release` workflow，或推送版本标签：
+
+```bash
+git tag qafoneTools-v0.1.0
+git push origin qafoneTools-v0.1.0
+```
+
+构建完成后，GitHub 会创建一个 draft release，并上传 macOS `.dmg` 与 Windows `.exe` 安装包。
+
 ### 目录结构
 
 ```
@@ -88,4 +103,3 @@ src-tauri/              # 后端（Rust / Tauri）
 ## License
 
 本项目采用 [AGPL-3.0 协议](LICENSE) 开源。
-
