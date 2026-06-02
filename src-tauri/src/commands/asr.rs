@@ -258,7 +258,7 @@ pub async fn extract_subtitles(
                 // On macOS, enable Metal GPU acceleration (Flash Attention) —
                 // this is the same flag VoiceInk uses and gives a 10-20x
                 // speedup over CPU-only inference on Apple Silicon.
-                let ctx_params = WhisperContextParameters::default();
+                let mut ctx_params = WhisperContextParameters::default();
                 #[cfg(target_os = "macos")]
                 {
                     ctx_params.use_gpu = true;
