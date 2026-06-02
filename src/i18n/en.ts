@@ -334,6 +334,8 @@ export interface Translations {
     noSubtitleFile: string;
     noResolution: string;
     ffmpegRequired: string;
+    preserveAssTemplate: string;
+    preserveAssTemplateDesc: string;
     layoutMode: string;
     layoutGrouped: string;
     layoutGroupedDesc: string;
@@ -743,6 +745,8 @@ const en: Translations = {
     noSubtitleFile: 'Please import at least one subtitle file.',
     noResolution: 'Please specify a video resolution.',
     ffmpegRequired: 'FFmpeg is required to detect resolution. Install FFmpeg or enter manually.',
+    preserveAssTemplate: 'Keep existing ASS effects template',
+    preserveAssTemplateDesc: 'Use the imported ASS styles as the template and only scale the Fontsize column from the original PlayResY to the target height.',
     layoutMode: 'Event Arrangement',
     layoutGrouped: 'Grouped',
     layoutGroupedDesc: 'All events of one language listed together, then the other',

@@ -54,9 +54,9 @@ export function DropZone({
           <X className="h-4 w-4" />
         </button>
       )}
-      <div className="flex h-12 w-12 items-center justify-center rounded-md bg-muted">{icon}</div>
-      <div className="px-4 text-center">
-        <div className="max-w-[260px] truncate font-medium">{isLoaded ? loadedName : label}</div>
+      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md bg-muted">{icon}</div>
+      <div className="flex w-full flex-col items-center px-4 text-center">
+        <div className="w-full max-w-[260px] truncate text-center font-medium">{isLoaded ? loadedName : label}</div>
         <div className="mt-1 text-sm text-muted-foreground">{hint}</div>
       </div>
       <Button variant="outline" size="sm" onClick={onBrowse}>

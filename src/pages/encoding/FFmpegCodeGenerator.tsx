@@ -180,7 +180,7 @@ export default function FfmpegCodeGeneratorPage() {
 
   // ── Encode settings ────────────────────────────────────────────────────────
   const [codec, setCodec] = useState<Codec>('libx264');
-  const [preset, setPreset] = useState<Preset>('veryslow');
+  const [preset, setPreset] = useState<Preset>('slow');
   const [crf, setCrf] = useState(19);
 
   // ── Test segment ───────────────────────────────────────────────────────────
