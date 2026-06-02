@@ -18,8 +18,6 @@
 
 use serde::Deserialize;
 use tauri::{AppHandle, Manager};
-use tauri_plugin_shell::process::CommandEvent;
-use tauri_plugin_shell::ShellExt;
 
 use super::asr::AsrSegment;
 use super::model_manager::get_model_dir;
@@ -247,56 +245,74 @@ async fn run_sidecar_batch(
     ];
     args.extend_from_slice(wav_paths);
 
-    let sidecar_cmd = app
-        .shell()
-        .sidecar("sherpa")
-        .map_err(|e| format!("sherpa sidecar 未找到: {e}"))?
-        .args(args);
-
-    let (mut rx, _child) = sidecar_cmd
-        .spawn()
-        .map_err(|e| format!("sherpa 启动失败: {e}"))?;
+    let sherpa_exe = resolve_sherpa_executable(app);
+    let output = tokio::process::Command::new(&sherpa_exe)
+        .args(&args)
+        .output()
+        .await
+        .map_err(|e| format!("sherpa 启动失败 ({sherpa_exe:?}): {e}"))?;
 
     let mut records: Vec<SherpaRecord> = Vec::new();
-    let mut all_stderr = String::new();
-    let mut all_stdout_raw = String::new();
     let mut record_idx: usize = 0;
-    let mut exit_code: i32 = -1;
 
-    loop {
-        let Some(event) = rx.recv().await else { break };
-        match event {
-            CommandEvent::Stdout(bytes) => {
-                let line = String::from_utf8_lossy(&bytes);
-                let line_trim = line.trim().to_owned();
-                all_stdout_raw.push_str(&line_trim);
-                all_stdout_raw.push('\n');
-                if line_trim.starts_with('{') {
-                    let offset = offsets.get(record_idx).copied().unwrap_or(0.0);
-                    if let Ok(mut rec) = serde_json::from_str::<SherpaRecord>(&line_trim) {
-                        rec.start_time += offset as f32;
-                        records.push(rec);
-                    }
-                    record_idx += 1;
-                }
+    let all_stdout_raw = String::from_utf8_lossy(&output.stdout).to_string();
+    let all_stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    for line in all_stdout_raw.lines() {
+        let line_trim = line.trim();
+        if line_trim.starts_with('{') {
+            let offset = offsets.get(record_idx).copied().unwrap_or(0.0);
+            if let Ok(mut rec) = serde_json::from_str::<SherpaRecord>(line_trim) {
+                rec.start_time += offset as f32;
+                records.push(rec);
             }
-            CommandEvent::Stderr(bytes) => {
-                all_stderr.push_str(String::from_utf8_lossy(&bytes).trim());
-                all_stderr.push('\n');
-            }
-            CommandEvent::Terminated(payload) => {
-                exit_code = payload.code.unwrap_or(-1);
-                break;
-            }
-            _ => {}
+            record_idx += 1;
         }
     }
 
+    let exit_code = output.status.code().unwrap_or(-1);
     if exit_code != 0 {
         Err(format!("exit_code={exit_code}\nstderr={all_stderr}"))
     } else {
         Ok((records, all_stdout_raw, all_stderr))
     }
+}
+
+fn resolve_sherpa_executable(app: &AppHandle) -> std::path::PathBuf {
+    let exe_name = if cfg!(windows) { "sherpa.exe" } else { "sherpa" };
+    let alt_name = if cfg!(windows) {
+        "sherpa-onnx-offline.exe"
+    } else {
+        "sherpa-onnx-offline"
+    };
+
+    let mut dirs = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        dirs.push(resource_dir.join("binaries"));
+        dirs.push(resource_dir);
+    }
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(exe_dir) = current_exe.parent() {
+            dirs.push(exe_dir.join("binaries"));
+            dirs.push(exe_dir.to_path_buf());
+        }
+    }
+    if let Ok(current_dir) = std::env::current_dir() {
+        dirs.push(current_dir.join("binaries"));
+        dirs.push(current_dir.join("src-tauri").join("binaries"));
+        dirs.push(current_dir);
+    }
+
+    for dir in dirs {
+        for name in [exe_name, alt_name] {
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+
+    std::path::PathBuf::from(exe_name)
 }
 
 // ─── Public entry point ───────────────────────────────────────────────────────
