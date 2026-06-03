@@ -60,6 +60,7 @@ export interface Translations {
     extractionComplete: string;
     exportSrt: string;
     sendToTranslation: string;
+    translationBusy: string;
     resultPreview: string;
     resultPlaceholder: string;
     // Model management actions
@@ -479,6 +480,7 @@ const en: Translations = {
     extractionComplete: 'Extraction Complete',
     exportSrt: 'Export as .srt',
     sendToTranslation: 'Send to Translation Workflow',
+    translationBusy: 'The translation workflow already has an active task. Please close the current video and subtitle there before sending a new one.',
     resultPreview: 'Subtitle Preview',
     resultPlaceholder: '',
     // Model management actions

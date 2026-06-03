@@ -58,11 +58,63 @@ interface TranslationEntry extends SrtEntry {
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 type WorkspaceLayout = 'stacked' | 'side';
 
+interface PendingTranslationImport {
+  srtContent: string;
+  srtFilename: string;
+  srtPath: string | null;
+  videoName: string;
+  videoPath: string | null;
+  videoObjectUrl: string | null;
+}
+
+const PENDING_TRANSLATION_IMPORT_KEY = 'qafone-pending-translation-import';
+const LEGACY_PENDING_SRT_KEY = 'qafone-pending-srt';
+const TRANSLATION_BUSY_KEY = 'qafone-translation-busy';
+const TRANSLATION_IMPORT_EVENT = 'qafone-translation-import';
+
 function toTranslationEntries(entries: SrtEntry[]): TranslationEntry[] {
   return entries.map((entry) => ({
     ...entry,
     translationNote: (entry as Partial<TranslationEntry>).translationNote ?? '',
   }));
+}
+
+function getFileName(path: string): string {
+  return path.replace(/\\/g, '/').split('/').pop() ?? path;
+}
+
+function takePendingTranslationImport(): PendingTranslationImport | null {
+  const raw = sessionStorage.getItem(PENDING_TRANSLATION_IMPORT_KEY);
+  if (raw) {
+    sessionStorage.removeItem(PENDING_TRANSLATION_IMPORT_KEY);
+    try {
+      const parsed = JSON.parse(raw) as Partial<PendingTranslationImport>;
+      if (typeof parsed.srtContent === 'string' && parsed.srtContent.trim()) {
+        return {
+          srtContent: parsed.srtContent,
+          srtFilename: typeof parsed.srtFilename === 'string' && parsed.srtFilename ? parsed.srtFilename : 'subtitles.srt',
+          srtPath: typeof parsed.srtPath === 'string' ? parsed.srtPath : null,
+          videoName: typeof parsed.videoName === 'string' ? parsed.videoName : '',
+          videoPath: typeof parsed.videoPath === 'string' ? parsed.videoPath : null,
+          videoObjectUrl: typeof parsed.videoObjectUrl === 'string' ? parsed.videoObjectUrl : null,
+        };
+      }
+    } catch (error) {
+      console.error('Failed to parse pending translation import:', error);
+    }
+  }
+
+  const legacySrt = sessionStorage.getItem(LEGACY_PENDING_SRT_KEY);
+  if (!legacySrt) return null;
+  sessionStorage.removeItem(LEGACY_PENDING_SRT_KEY);
+  return {
+    srtContent: legacySrt,
+    srtFilename: 'subtitles.srt',
+    srtPath: null,
+    videoName: '',
+    videoPath: null,
+    videoObjectUrl: null,
+  };
 }
 
 function hasTranslationNote(entry: TranslationEntry): boolean {
@@ -289,19 +341,49 @@ export default function TranslationPage() {
     };
   }, [srtEntries, srtFilePath]);
 
-  // Load SRT from subtitle extraction page (via sessionStorage)
-  useEffect(() => {
-    const pending = sessionStorage.getItem('qafone-pending-srt');
+  const importPendingTranslationTask = useCallback(async () => {
+    const pending = takePendingTranslationImport();
     if (!pending) return;
-    sessionStorage.removeItem('qafone-pending-srt');
-    const parsed = toTranslationEntries(parseSrt(pending));
+
+    if (pending.videoPath && isTauri()) {
+      const { convertFileSrc } = await import('@tauri-apps/api/core');
+      const url = convertFileSrc(pending.videoPath);
+      if (videoUrl) URL.revokeObjectURL(videoUrl);
+      setVideoFilePath(pending.videoPath);
+      setVideoFile(null);
+      setVideoUrl(url);
+      setVideoFilename(pending.videoName || getFileName(pending.videoPath));
+      setPeaks(null);
+      setWaveformStatus('idle');
+      setCurrentTime(0);
+      setIsPlaying(false);
+    } else if (pending.videoObjectUrl) {
+      if (videoUrl) URL.revokeObjectURL(videoUrl);
+      setVideoFilePath(null);
+      setVideoFile(null);
+      setVideoUrl(pending.videoObjectUrl);
+      setVideoFilename(pending.videoName || 'video');
+      setPeaks(null);
+      setWaveformStatus('idle');
+      setCurrentTime(0);
+      setIsPlaying(false);
+    }
+
+    const parsed = toTranslationEntries(parseSrt(pending.srtContent));
     if (parsed.length > 0) {
       const content = exportSrt(parsed, 'bilingual');
-      loadSrtContent(content, 'subtitles.srt', null, true);
+      loadSrtContent(content, pending.srtFilename || 'subtitles.srt', pending.srtPath, true);
       subtitleDirtyRef.current = true;
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadSrtContent]);
+  }, [loadSrtContent, videoUrl]);
+
+  // Load SRT/video from subtitle extraction page. The page stays mounted while
+  // hidden, so navigation alone will not re-run this effect; listen for an event.
+  useEffect(() => {
+    importPendingTranslationTask();
+    window.addEventListener(TRANSLATION_IMPORT_EVENT, importPendingTranslationTask);
+    return () => window.removeEventListener(TRANSLATION_IMPORT_EVENT, importPendingTranslationTask);
+  }, [importPendingTranslationTask]);
 
   // Auto-scroll to active
   useEffect(() => {
@@ -657,6 +739,11 @@ export default function TranslationPage() {
   const hasSrt = srtEntries.length > 0;
   const exportableTranslationNoteCount = srtEntries.filter(hasTranslationNote).length;
   const glossaryEntryCount = countGlossaryEntries(glossaryRows);
+
+  useEffect(() => {
+    sessionStorage.setItem(TRANSLATION_BUSY_KEY, hasVideo || hasSrt ? '1' : '0');
+  }, [hasVideo, hasSrt]);
+
   const subtitleModeLabel =
     subtitleMode === 'both'
       ? t.translationPage.subBoth

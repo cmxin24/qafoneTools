@@ -59,6 +59,7 @@ const zh: Translations = {
     extractionComplete: '提取完成',
     exportSrt: '导出为 .srt',
     sendToTranslation: '发送到翻译工作流',
+    translationBusy: '翻译工作流已有任务，请先到翻译页面关闭当前视频和字幕后再发送新的任务。',
     resultPreview: '字幕预览',
     resultPlaceholder: '',
     // Model management actions

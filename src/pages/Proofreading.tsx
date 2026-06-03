@@ -7,7 +7,7 @@ import {
   type DragEvent,
   type ChangeEvent,
 } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { invoke } from '@tauri-apps/api/core';
 import {
   BookOpen,
@@ -209,8 +209,11 @@ function buildProofreadNotesHtml(
 
 export default function ProofreadingPage() {
   const { t } = useI18n();
+  const location = useLocation();
   const navigate = useNavigate();
   const p = t.proofreadingPage;
+  const locationRef = useRef(location.pathname);
+  useEffect(() => { locationRef.current = location.pathname; }, [location.pathname]);
 
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoFile, setVideoFile] = useState<File | null>(null);
@@ -413,6 +416,14 @@ export default function ProofreadingPage() {
       const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow');
       const { convertFileSrc } = await import('@tauri-apps/api/core');
       unlisten = await getCurrentWebviewWindow().onDragDropEvent(async (event) => {
+        if (locationRef.current !== '/proofreading') {
+          setVideoDragOver(false);
+          setSrtDragOver(false);
+          setProofreadDragOver(false);
+          activeDragZoneRef.current = null;
+          return;
+        }
+
         const { type } = event.payload;
 
         if ((type === 'enter' || type === 'over') && 'position' in event.payload) {
