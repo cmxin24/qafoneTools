@@ -129,6 +129,19 @@ interface DroppedFile {
   objectUrl: string | null; // Blob URL for browser-mode playback
 }
 
+interface PendingTranslationImport {
+  srtContent: string;
+  srtFilename: string;
+  srtPath: string | null;
+  videoName: string;
+  videoPath: string | null;
+  videoObjectUrl: string | null;
+}
+
+const PENDING_TRANSLATION_IMPORT_KEY = 'qafone-pending-translation-import';
+const TRANSLATION_BUSY_KEY = 'qafone-translation-busy';
+const TRANSLATION_IMPORT_EVENT = 'qafone-translation-import';
+
 // ─── Subtitle extraction history ──────────────────────────────────────────────
 
 interface SubtitleHistoryRecord {
@@ -218,6 +231,11 @@ function segmentsToSrt(segments: AsrSegment[]): string {
     .join('\n');
 }
 
+function buildSrtFilename(sourceName: string | undefined): string {
+  if (!sourceName) return 'subtitles.srt';
+  return `${sourceName.replace(/\.[^.]+$/, '') || 'subtitles'}.srt`;
+}
+
 // ─── Tauri bridge ─────────────────────────────────────────────────────────────
 async function tauriCheckModelStatus(modelId: string): Promise<boolean> {
   if (!isTauri()) return false;
@@ -298,6 +316,7 @@ export default function SubtitleExtractionPage() {
     clearTask,
     setSegments: setSrtSegments,
     setStatus,
+    taskFile,
   } = useAsrTask();
 
   // ── File state ──────────────────────────────────────────────────────────────
@@ -563,9 +582,25 @@ export default function SubtitleExtractionPage() {
   // ── Send to translation ─────────────────────────────────────────────────────
   const handleSendToTranslation = useCallback(() => {
     if (!srtSegments.length) return;
-    sessionStorage.setItem('qafone-pending-srt', segmentsToSrt(srtSegments));
+    if (sessionStorage.getItem(TRANSLATION_BUSY_KEY) === '1') {
+      window.alert(se.translationBusy);
+      navigate('/translation');
+      return;
+    }
+
+    const sourceFile = droppedFile ?? taskFile;
+    const payload: PendingTranslationImport = {
+      srtContent: segmentsToSrt(srtSegments),
+      srtFilename: buildSrtFilename(sourceFile?.name),
+      srtPath: null,
+      videoName: sourceFile?.name ?? '',
+      videoPath: sourceFile?.path ?? null,
+      videoObjectUrl: sourceFile?.objectUrl ?? null,
+    };
+    sessionStorage.setItem(PENDING_TRANSLATION_IMPORT_KEY, JSON.stringify(payload));
+    window.dispatchEvent(new CustomEvent(TRANSLATION_IMPORT_EVENT));
     navigate('/translation');
-  }, [srtSegments, navigate]);
+  }, [srtSegments, droppedFile, taskFile, se.translationBusy, navigate]);
 
   // ── Audio player controls ───────────────────────────────────────────────────
   const togglePlay = useCallback(() => {
