@@ -32,6 +32,16 @@ export interface Translations {
     dark: string;
     light: string;
     system: string;
+    // Updates
+    updates: string;
+    currentVersion: string;
+    autoCheckUpdates: string;
+    checkForUpdates: string;
+    checking: string;
+    upToDate: string;
+    updateAvailable: string;
+    viewRelease: string;
+    checkFailed: string;
   };
   subtitleExtraction: {
     title: string;
@@ -134,13 +144,24 @@ export interface Translations {
     // Output settings
     outputSettings: string;
     resolution: string;
-    autoCrop: string;
-    autoCropHint: string;
+    currentResolution: string;
+    estimatedOutputResolution: string;
+    readingResolution: string;
+    resolutionUnavailable: string;
+    resolutionReadFailed: string;
+    pendingCommand: string;
+    copy: string;
+    copied: string;
     // Actions
     startCompress: string;
+    preparingCompress: string;
     compressing: string;
+    pauseCompress: string;
+    resumeCompress: string;
+    cancelCompress: string;
+    cancelingCompress: string;
+    compressPaused: string;
     compressComplete: string;
-    detectingCrop: string;
     openOutput: string;
     openOutputFolder: string;
   };
@@ -233,6 +254,42 @@ export interface Translations {
     exitDialogExportBoth: string;
     exitDialogDiscard: string;
     exitDialogCancel: string;
+    machineTranslateEndpointPlaceholder: string;
+    machineTranslatePanel: string;
+    machineTranslatePanelClose: string;
+    machineTranslateAdvanced: string;
+    machineTranslateCustomService: string;
+    machineTranslateUseLocal: string;
+    machineTranslateFormatting: string;
+    machineTranslateSpaceAfterComma: string;
+    machineTranslateRemoveFinalPeriod: string;
+    machineTranslatePolish: string;
+    machineTranslatePolishEndpoint: string;
+    machineTranslatePolishModel: string;
+    machineTranslatePolishPrompt: string;
+    machineTranslateContextWindow: string;
+    machineTranslatePolishTest: string;
+    machineTranslatePolishTesting: string;
+    machineTranslatePolishCurrent: string;
+    machineTranslatePolishAll: string;
+    machineTranslateCurrent: string;
+    machineTranslateAll: string;
+    machineTranslateSentence: string;
+    machineTranslateProgress: string;
+    machineTranslateBatch: string;
+    machineTranslatePolishing: string;
+    machineTranslatePolishingModel: string;
+    machineTranslatePolishingLine: string;
+    machineTranslateDone: string;
+    machineTranslateError: string;
+    machineTranslateNoEndpoint: string;
+    machineTranslateNoTranslationToPolish: string;
+    machineTranslateOverwriteConfirm: string;
+    nllbRuntimeReady: string;
+    nllbRuntimeMissing: string;
+    nllbRuntimeInstalling: string;
+    nllbRuntimeNotReady: string;
+    nllbRuntimeInstallConfirm: string;
   };
   proofreadingPage: {
     title: string;
@@ -455,6 +512,16 @@ const en: Translations = {
     dark: 'Dark',
     light: 'Light',
     system: 'System',
+    // Updates
+    updates: 'Updates',
+    currentVersion: 'Current Version',
+    autoCheckUpdates: 'Auto-check on startup',
+    checkForUpdates: 'Check for Updates',
+    checking: 'Checking...',
+    upToDate: 'You are up to date',
+    updateAvailable: 'New version available',
+    viewRelease: 'View Release Page',
+    checkFailed: 'Check failed',
   },
   subtitleExtraction: {
     title: 'Video Subtitle Extraction',
@@ -533,7 +600,7 @@ const en: Translations = {
   },
   compactVideo: {
     title: 'Compact Video',
-    description: 'Re-encode video to a smaller, share-friendly file with auto black-bar removal.',
+    description: 'Re-encode video to a smaller, share-friendly MP4 file.',
     dropzone: 'Drag & drop a video file here',
     dropzoneHint: 'or click to browse  ·  Supported: .mp4 .mkv .mov .avi .ts',
     fileSelected: 'File selected',
@@ -548,12 +615,23 @@ const en: Translations = {
     ffmpegDownloadComplete: 'FFmpeg downloaded successfully',
     outputSettings: 'Output Settings',
     resolution: 'Target Resolution',
-    autoCrop: 'Auto-remove black bars',
-    autoCropHint: 'Detects and crops letterbox / pillarbox borders before scaling',
+    currentResolution: 'Current resolution',
+    estimatedOutputResolution: 'Estimated output resolution',
+    readingResolution: 'Reading resolution…',
+    resolutionUnavailable: 'Current resolution appears after FFmpeg is installed',
+    resolutionReadFailed: 'Failed to read resolution',
+    pendingCommand: 'Pending FFmpeg Command',
+    copy: 'Copy',
+    copied: 'Copied!',
     startCompress: 'Start Compression',
+    preparingCompress: 'Reading video info…',
     compressing: 'Compressing…',
+    pauseCompress: 'Pause',
+    resumeCompress: 'Resume',
+    cancelCompress: 'Cancel',
+    cancelingCompress: 'Canceling…',
+    compressPaused: 'Paused',
     compressComplete: 'Compression Complete',
-    detectingCrop: 'Detecting black bars…',
     openOutput: 'Open Output File',
     openOutputFolder: 'Open Output Folder',
   },
@@ -646,6 +724,42 @@ const en: Translations = {
     exitDialogExportBoth: 'Export Both & Close',
     exitDialogDiscard: 'Close Without Saving',
     exitDialogCancel: 'Cancel',
+    machineTranslateEndpointPlaceholder: 'qafone://local-nllb or local translation service URL',
+    machineTranslatePanel: 'Auto Translate',
+    machineTranslatePanelClose: 'Close auto translate panel',
+    machineTranslateAdvanced: 'Advanced service',
+    machineTranslateCustomService: 'Using custom translation service',
+    machineTranslateUseLocal: 'Use local NLLB',
+    machineTranslateFormatting: 'Output format',
+    machineTranslateSpaceAfterComma: 'Space after comma',
+    machineTranslateRemoveFinalPeriod: 'Remove final period',
+    machineTranslatePolish: 'Polish after auto translation',
+    machineTranslatePolishEndpoint: 'OpenAI-compatible chat endpoint',
+    machineTranslatePolishModel: 'Model',
+    machineTranslatePolishPrompt: 'Polish prompt',
+    machineTranslateContextWindow: 'Context',
+    machineTranslatePolishTest: 'Test Ollama',
+    machineTranslatePolishTesting: 'Testing LLM polish service...',
+    machineTranslatePolishCurrent: 'Polish Current',
+    machineTranslatePolishAll: 'Polish All Translations',
+    machineTranslateCurrent: 'Translate Current',
+    machineTranslateAll: 'Translate All',
+    machineTranslateSentence: 'Translate sentence',
+    machineTranslateProgress: 'Translating {completed}/{total}',
+    machineTranslateBatch: 'Starting lines {from}-{to}/{total}',
+    machineTranslatePolishing: 'Polishing with LLM...',
+    machineTranslatePolishingModel: 'Calling {model} at {endpoint}',
+    machineTranslatePolishingLine: 'Polishing line {current}/{total} with {model}',
+    machineTranslateDone: 'Translated {count} lines',
+    machineTranslateError: 'Translation failed',
+    machineTranslateNoEndpoint: 'Please enter a translation service URL.',
+    machineTranslateNoTranslationToPolish: 'No existing translation to polish.',
+    machineTranslateOverwriteConfirm: 'This will overwrite existing translated lines. Continue?',
+    nllbRuntimeReady: 'Runtime ready',
+    nllbRuntimeMissing: 'Runtime not installed',
+    nllbRuntimeInstalling: 'Installing NLLB runtime...',
+    nllbRuntimeNotReady: 'NLLB runtime is not ready.',
+    nllbRuntimeInstallConfirm: 'Local NLLB needs {missing}. Install the isolated runtime to {path} now?',
   },
   proofreadingPage: {
     title: 'Proofreading',

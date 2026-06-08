@@ -23,6 +23,7 @@ pub fn run() {
         })
         // ── 全局管理状态 ──────────────────────────────────────────────────────────────
         .manage(commands::asr::CancellationFlag(Arc::new(AtomicBool::new(false))))
+        .manage(commands::video_compressor::VideoCompressionState::default())
         // ── 注册所有前端可调用的 Tauri 命令 ─────────────────────────────────
         // 每个命令对应前端 `invoke('command_name', args)` 的一次调用
         .invoke_handler(tauri::generate_handler![
@@ -33,6 +34,9 @@ pub fn run() {
             commands::video_compressor::check_ffmpeg_status,
             commands::video_compressor::download_ffmpeg,
             commands::video_compressor::compress_video,
+            commands::video_compressor::pause_video_compression,
+            commands::video_compressor::resume_video_compression,
+            commands::video_compressor::cancel_video_compression,
             commands::video_compressor::open_path,
             commands::video_compressor::get_file_size,
             commands::video_compressor::save_text_file,
@@ -41,12 +45,18 @@ pub fn run() {
             commands::waveform::extract_waveform,
             commands::asr::extract_subtitles,
             commands::asr::cancel_extraction,
+            commands::translator::translate_texts,
+            commands::translator::polish_translations,
+            commands::translator::check_polish_service,
+            commands::translator::check_nllb_runtime,
+            commands::translator::install_nllb_runtime,
             commands::audio_extractor::get_audio_tracks,
             commands::audio_extractor::preview_audio_track,
             commands::audio_extractor::extract_audio_track,
             commands::font_manager::check_font_installed,
             commands::font_manager::download_and_install_font,
             commands::font_manager::open_fonts_directory,
+            commands::updater::check_for_updates,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用运行失败");

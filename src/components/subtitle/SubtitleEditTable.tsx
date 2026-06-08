@@ -1,4 +1,4 @@
-import { useEffect, useRef, type RefObject } from 'react';
+import { useEffect, useRef, type ReactNode, type RefObject } from 'react';
 import { MoreVertical } from 'lucide-react';
 import { type SrtEntry } from '@/components/WaveformDisplay';
 import { autoResize, formatDuration, msToSrtTime } from './subtitleWorkspace';
@@ -30,6 +30,7 @@ interface SubtitleEditTableProps<T extends SrtEntry> {
   onInsertAfter: (idx: number) => void;
   onSplit: (idx: number) => void;
   onDelete: (idx: number) => void;
+  rowAction?: (entry: T, idx: number) => ReactNode;
 }
 
 export function SubtitleEditTable<T extends SrtEntry>({
@@ -48,6 +49,7 @@ export function SubtitleEditTable<T extends SrtEntry>({
   onInsertAfter,
   onSplit,
   onDelete,
+  rowAction,
 }: SubtitleEditTableProps<T>) {
   const textareaRefs = useRef<Map<string, HTMLTextAreaElement>>(new Map());
 
@@ -104,6 +106,7 @@ export function SubtitleEditTable<T extends SrtEntry>({
                 <span className="font-mono">{msToSrtTime(entry.endMs)}</span>
                 <span className="text-muted-foreground/50">({formatDuration(entry.endMs - entry.startMs)})</span>
                 <div className="flex-1" />
+                {rowAction?.(entry, idx)}
                 <button
                   type="button"
                   className="rounded p-0.5 opacity-40 transition-opacity hover:bg-accent hover:opacity-100"

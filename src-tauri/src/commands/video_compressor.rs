@@ -3,15 +3,15 @@
 //! 负责 FFmpeg 的 **状态检测**、**下载** 以及 **视频小版本压制**。
 //!
 //! ## 压制流程
-//! 1. **黑边检测（cropdetect）**：对视频前 5 分钟运行 `ffmpeg -vf cropdetect`，
-//!    解析 stderr 取最终稳定的 `crop=w:h:x:y` 参数。
-//! 2. **编码**：使用 x264（CRF 22，preset fast，profile high）和 AAC 256kbps
+//! 1. **读取时长**：通过 FFmpeg 探测输入视频总时长，用于计算转码进度。
+//! 2. **编码**：使用 x264（CRF 22，preset slow，profile high）和 AAC 256kbps
 //!    输出 MP4，缩放到目标高度同时保持宽高比，宽度自动补齐为 2 的倍数（`scale=-2:height`）。
-//! 3. **进度追踪**：解析 FFmpeg stderr 中的 `time=HH:MM:SS.ms` 字段，
+//! 3. **进度追踪**：解析 FFmpeg progress 输出中的 `out_time` / `time` 字段，
 //!    结合视频总时长计算百分比，通过 `video-compress-progress` 事件推送前端。
 
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -19,7 +19,11 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::{fs, io::AsyncWriteExt};
+use tokio::{
+    fs,
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::Mutex,
+};
 
 // ─── CDN 配置 ──────────────────────────────────────────────────────────────────
 
@@ -72,10 +76,46 @@ pub struct FfmpegDownloadProgressPayload {
 /// 视频压制进度事件 payload（前端监听 `video-compress-progress`）。
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VideoCompressProgressPayload {
-    /// 当前阶段："crop_detect" | "encoding" | "done" | "error"
+    /// 当前阶段："preparing" | "encoding" | "done" | "canceled" | "error"
     pub phase: String,
     /// 当前阶段完成百分比（0.0 ~ 100.0）
     pub progress_pct: f64,
+}
+
+#[derive(Debug)]
+struct ActiveVideoCompression {
+    pid: u32,
+    paused: bool,
+    cancel_requested: bool,
+}
+
+/// 当前小版本压制任务状态，用于暂停、继续和取消正在运行的 FFmpeg 子进程。
+#[derive(Default)]
+pub struct VideoCompressionState {
+    active: Arc<Mutex<Option<ActiveVideoCompression>>>,
+}
+
+impl VideoCompressionState {
+    async fn start(&self, pid: u32) -> Result<(), String> {
+        let mut active = self.active.lock().await;
+        if active.is_some() {
+            return Err("已有小版本压制任务正在运行".to_string());
+        }
+        *active = Some(ActiveVideoCompression {
+            pid,
+            paused: false,
+            cancel_requested: false,
+        });
+        Ok(())
+    }
+
+    async fn finish(&self) -> bool {
+        let mut active = self.active.lock().await;
+        active
+            .take()
+            .map(|task| task.cancel_requested)
+            .unwrap_or(false)
+    }
 }
 
 // ─── 工具函数 ──────────────────────────────────────────────────────────────────
@@ -231,26 +271,24 @@ pub async fn download_ffmpeg(app: AppHandle) -> Result<(), String> {
 /// **压制视频为小版本**
 ///
 /// 流程：
-/// 1. 运行 `ffmpeg -vf cropdetect` 检测黑边，发送 `video-compress-progress { phase: "crop_detect" }` 事件
-/// 2. 解析 cropdetect 输出，取最终稳定的 crop 参数
-/// 3. 运行编码：`-vf "crop=w:h:x:y,scale=-2:target_height" -c:v libx264 -crf 22 -preset fast -profile:v high ...`
-///    解析 stderr 中的 `time=` 字段推算进度，发送 `video-compress-progress { phase: "encoding" }` 事件
-/// 4. 完成后返回输出文件路径
+/// 1. 探测输入视频总时长，发送 `video-compress-progress { phase: "preparing" }` 事件
+/// 2. 运行编码：`-vf "scale=-2:target_height" -c:v libx264 -crf 22 -preset slow -profile:v high ...`
+///    实时解析 FFmpeg progress 输出推算进度，发送 `video-compress-progress { phase: "encoding" }` 事件
+/// 3. 完成后返回输出文件路径
 ///
 /// # 参数
 /// - `input_path`: 输入视频绝对路径
 /// - `target_height`: 目标高度（360/480/540/720）
-/// - `auto_crop`: 是否自动检测并去除黑边
 ///
 /// # 返回
 /// 输出文件的绝对路径字符串
 #[tauri::command]
 pub async fn compress_video(
     app: AppHandle,
+    state: tauri::State<'_, VideoCompressionState>,
     input_path: String,
     output_path: String,
     target_height: u32,
-    auto_crop: bool,
 ) -> Result<String, String> {
     let ffmpeg = resolve_ffmpeg_executable(&app)
         .ok_or_else(|| "FFmpeg 未找到，请先下载".to_string())?;
@@ -260,36 +298,25 @@ pub async fn compress_video(
         return Err(format!("输入文件不存在: {input_path}"));
     }
 
-    // ── 1. 构造输出路径（优先使用前端传入的路径，否则默认加 _小版本 后缀）──────
-    let resolved_output = if output_path.trim().is_empty() {
+    // ── 1. 构造输出路径（优先使用前端传入的路径，否则默认加 _小版本 后缀；固定 MP4）────
+    let mut resolved_output = if output_path.trim().is_empty() {
         let stem = input.file_stem().unwrap_or_default().to_string_lossy();
-        let ext  = input.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_else(|| ".mp4".to_string());
         input
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
-            .join(format!("{stem}_小版本{ext}"))
+            .join(format!("{stem}_小版本.mp4"))
     } else {
         PathBuf::from(&output_path)
     };
+    resolved_output.set_extension("mp4");
 
-    // ── 2. 阶段一：黑边检测 ───────────────────────────────────────────────
-    let _ = app.emit(
-        "video-compress-progress",
-        VideoCompressProgressPayload { phase: "crop_detect".into(), progress_pct: 0.0 },
-    );
-
-    let crop_filter = if auto_crop {
-        detect_crop(&ffmpeg, &input, &app).await?
-    } else {
-        None
-    };
+    // ── 2. 读取视频信息 ───────────────────────────────────────────────────
+    emit_compress_progress(&app, "preparing", 0.0);
+    let duration_secs = probe_duration_secs(&ffmpeg, &input_path).await.unwrap_or(0.0);
 
     // ── 3. 构造视频滤镜链 ─────────────────────────────────────────────────
     // scale=-2:height 确保宽度自动计算并对齐为 2 的倍数（ffmpeg 内建语义）
-    let vf = match crop_filter {
-        Some(crop) => format!("{crop},scale=-2:{target_height}"),
-        None       => format!("scale=-2:{target_height}"),
-    };
+    let vf = format!("scale=-2:{target_height}");
 
     // ── 4. 阶段二：编码 ───────────────────────────────────────────────────
     // x264opts 参考 HandBrake 预设：高质量、兼容性强的参数组合
@@ -299,16 +326,19 @@ pub async fn compress_video(
         "aq-mode=2:aq-strength=0.8"
     );
 
-    let status = tokio::process::Command::new(&ffmpeg)
+    emit_compress_progress(&app, "encoding", 0.0);
+    let mut child = tokio::process::Command::new(&ffmpeg)
         .args([
             "-y",
             "-i", &input_path,
+            "-progress", "pipe:2",
+            "-nostats",
             // 视频
             "-vf", &vf,
             "-c:v", "libx264",
             "-crf", "22",
             "-profile:v", "high",
-            "-preset", "fast",
+            "-preset", "slow",
             "-x264opts", x264_opts,
             // 音频
             "-c:a", "aac",
@@ -322,85 +352,305 @@ pub async fn compress_video(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("启动 FFmpeg 失败: {e}"))?
-        .wait_with_output()
-        .await
-        .map_err(|e| format!("FFmpeg 执行出错: {e}"))?;
+        .map_err(|e| format!("启动 FFmpeg 失败: {e}"))?;
 
-    // TODO: 在 spawn 后实时读取 stderr 流并解析 `time=` 字段推送编码进度
-    // 当前骨架直接等待完成后发送 100%
-
-    let _ = app.emit(
-        "video-compress-progress",
-        VideoCompressProgressPayload { phase: "encoding".into(), progress_pct: 100.0 },
-    );
-
-    if !status.status.success() {
-        let stderr = String::from_utf8_lossy(&status.stderr);
-        return Err(format!("FFmpeg 编码失败:\n{}", &stderr[stderr.len().saturating_sub(500)..],));
+    let pid = child
+        .id()
+        .ok_or_else(|| "无法获取 FFmpeg 进程 ID".to_string())?;
+    if let Err(err) = state.start(pid).await {
+        let _ = child.kill().await;
+        return Err(err);
     }
 
-    let _ = app.emit(
-        "video-compress-progress",
-        VideoCompressProgressPayload { phase: "done".into(), progress_pct: 100.0 },
-    );
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            let _ = child.kill().await;
+            let _ = state.finish().await;
+            return Err("无法读取 FFmpeg 进度输出".to_string());
+        }
+    };
+    let progress_app = app.clone();
+    let stderr_tail = Arc::new(Mutex::new(String::new()));
+    let stderr_tail_reader = Arc::clone(&stderr_tail);
+    let progress_task = tokio::spawn(async move {
+        read_ffmpeg_progress(stderr, duration_secs, progress_app, stderr_tail_reader).await;
+    });
+
+    let status = match child.wait().await {
+        Ok(status) => status,
+        Err(err) => {
+            let _ = progress_task.await;
+            let _ = state.finish().await;
+            return Err(format!("FFmpeg 执行出错: {err}"));
+        }
+    };
+    let _ = progress_task.await;
+    let was_canceled = state.finish().await;
+
+    if was_canceled {
+        emit_compress_progress(&app, "canceled", 0.0);
+        return Err("压制已取消".to_string());
+    }
+
+    if !status.success() {
+        let stderr = stderr_tail.lock().await.clone();
+        let chars: Vec<char> = stderr.chars().rev().take(500).collect();
+        let tail: String = chars.into_iter().rev().collect();
+        emit_compress_progress(&app, "error", 0.0);
+        return Err(format!("FFmpeg 编码失败:\n{tail}"));
+    }
+
+    emit_compress_progress(&app, "done", 100.0);
 
     Ok(resolved_output.to_string_lossy().into_owned())
 }
 
+/// 暂停当前小版本压制任务。
+#[tauri::command]
+pub async fn pause_video_compression(
+    state: tauri::State<'_, VideoCompressionState>,
+) -> Result<(), String> {
+    let pid = {
+        let active = state.active.lock().await;
+        active
+            .as_ref()
+            .map(|task| task.pid)
+            .ok_or_else(|| "当前没有正在压制的任务".to_string())?
+    };
+
+    send_pause_signal(pid).await?;
+
+    let mut active = state.active.lock().await;
+    if let Some(task) = active.as_mut() {
+        if task.pid == pid {
+            task.paused = true;
+        }
+    }
+    Ok(())
+}
+
+/// 继续当前小版本压制任务。
+#[tauri::command]
+pub async fn resume_video_compression(
+    state: tauri::State<'_, VideoCompressionState>,
+) -> Result<(), String> {
+    let pid = {
+        let active = state.active.lock().await;
+        active
+            .as_ref()
+            .map(|task| task.pid)
+            .ok_or_else(|| "当前没有正在压制的任务".to_string())?
+    };
+
+    send_resume_signal(pid).await?;
+
+    let mut active = state.active.lock().await;
+    if let Some(task) = active.as_mut() {
+        if task.pid == pid {
+            task.paused = false;
+        }
+    }
+    Ok(())
+}
+
+/// 取消当前小版本压制任务。
+#[tauri::command]
+pub async fn cancel_video_compression(
+    state: tauri::State<'_, VideoCompressionState>,
+) -> Result<(), String> {
+    let pid = {
+        let mut active = state.active.lock().await;
+        let Some(task) = active.as_mut() else {
+            return Ok(());
+        };
+        task.cancel_requested = true;
+        task.paused = false;
+        task.pid
+    };
+
+    send_cancel_signal(pid).await
+}
+
 // ─── 内部函数 ──────────────────────────────────────────────────────────────────
 
-/// 运行 `ffmpeg -vf cropdetect` 并解析黑边参数。
-///
-/// 分析输入视频前 300 秒（最多 5 分钟），从 stderr 逐行读取 cropdetect 输出，
-/// 取最后稳定出现的 `crop=w:h:x:y` 字符串。
-///
-/// 返回 `Some("crop=w:h:x:y")` 或 `None`（无黑边时返回 None 避免不必要的 crop 滤镜）。
-async fn detect_crop(
-    ffmpeg: &PathBuf,
-    input: &PathBuf,
-    app: &AppHandle,
-) -> Result<Option<String>, String> {
+#[cfg(unix)]
+async fn send_process_signal(pid: u32, signal: &str) -> Result<(), String> {
+    let pid_arg = pid.to_string();
+    let status = tokio::process::Command::new("kill")
+        .args([signal, &pid_arg])
+        .status()
+        .await
+        .map_err(|e| format!("发送进程信号失败: {e}"))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("发送进程信号失败: {signal} {pid}"))
+    }
+}
+
+#[cfg(unix)]
+async fn send_pause_signal(pid: u32) -> Result<(), String> {
+    send_process_signal(pid, "-STOP").await
+}
+
+#[cfg(unix)]
+async fn send_resume_signal(pid: u32) -> Result<(), String> {
+    send_process_signal(pid, "-CONT").await
+}
+
+#[cfg(unix)]
+async fn send_cancel_signal(pid: u32) -> Result<(), String> {
+    let result = send_process_signal(pid, "-TERM").await;
+    let _ = send_process_signal(pid, "-CONT").await;
+    result
+}
+
+#[cfg(windows)]
+async fn send_pause_signal(_pid: u32) -> Result<(), String> {
+    Err("当前平台暂不支持暂停压制".to_string())
+}
+
+#[cfg(windows)]
+async fn send_resume_signal(_pid: u32) -> Result<(), String> {
+    Err("当前平台暂不支持继续压制".to_string())
+}
+
+#[cfg(windows)]
+async fn send_cancel_signal(pid: u32) -> Result<(), String> {
+    let pid_arg = pid.to_string();
+    let status = tokio::process::Command::new("taskkill")
+        .args(["/PID", &pid_arg, "/T", "/F"])
+        .status()
+        .await
+        .map_err(|e| format!("取消压制失败: {e}"))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("取消压制失败: {pid}"))
+    }
+}
+
+fn emit_compress_progress(app: &AppHandle, phase: &str, progress_pct: f64) {
+    let _ = app.emit(
+        "video-compress-progress",
+        VideoCompressProgressPayload {
+            phase: phase.to_string(),
+            progress_pct: progress_pct.clamp(0.0, 100.0),
+        },
+    );
+}
+
+async fn probe_duration_secs(ffmpeg: &PathBuf, input_path: &str) -> Result<f64, String> {
     let output = tokio::process::Command::new(ffmpeg)
-        .args([
-            "-i", input.to_str().unwrap_or(""),
-            "-vf", "cropdetect=24:16:0",
-            "-an",               // 忽略音频
-            "-f", "null",        // 不写输出
-            "-t", "300",         // 分析前 300 秒
-            "-",
-        ])
+        .args(["-i", input_path])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
         .await
-        .map_err(|e| format!("cropdetect 运行失败: {e}"))?;
+        .map_err(|e| format!("读取视频信息失败: {e}"))?;
 
-    let _ = app.emit(
-        "video-compress-progress",
-        VideoCompressProgressPayload { phase: "crop_detect".into(), progress_pct: 100.0 },
-    );
+    parse_duration_secs(&String::from_utf8_lossy(&output.stderr))
+        .ok_or_else(|| "无法读取视频时长".to_string())
+}
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+async fn read_ffmpeg_progress<R>(
+    mut stderr: R,
+    duration_secs: f64,
+    app: AppHandle,
+    stderr_tail: Arc<Mutex<String>>,
+) where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut buf = [0_u8; 4096];
+    let mut parse_tail = String::new();
 
-    // cropdetect 输出形如：
-    //   [Parsed_cropdetect_0 @ ...] x1:0 x2:1919 y1:140 y2:937 w:1920 h:800 x:0 y:140 pts:... crop=1920:800:0:140
-    // 取最后一条稳定值
-    let crop_str = stderr
-        .lines()
-        .filter_map(|line| {
-            // 找到 "crop=" 标记
-            line.split_whitespace()
-                .find(|token| token.starts_with("crop="))
-                .map(|s| s.to_owned())
-        })
-        .last();
+    loop {
+        let n = match stderr.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
 
-    // 如果检测到的 crop 与原始尺寸相同（无黑边），返回 None 跳过 crop 滤镜
-    // 简单判断：若 crop 参数包含 "x:0 y:0" 且宽高与原视频一致，则视为无黑边
-    // 实际生产中应对比 stream 信息；此处骨架直接返回检测结果
-    Ok(crop_str)
+        let chunk = String::from_utf8_lossy(&buf[..n]);
+        {
+            let mut tail = stderr_tail.lock().await;
+            tail.push_str(&chunk);
+            trim_to_last_chars(&mut tail, 4000);
+        }
+
+        let combined = format!("{parse_tail}{chunk}");
+        if let Some(seconds) = parse_progress_secs(&combined) {
+            let progress_pct = if duration_secs > 0.0 {
+                (seconds / duration_secs * 100.0).clamp(0.0, 99.9)
+            } else {
+                0.0
+            };
+            emit_compress_progress(&app, "encoding", progress_pct);
+        }
+
+        let tail_chars: Vec<char> = combined.chars().rev().take(128).collect();
+        parse_tail = tail_chars.into_iter().rev().collect();
+    }
+}
+
+fn trim_to_last_chars(value: &mut String, max_chars: usize) {
+    if value.chars().count() <= max_chars {
+        return;
+    }
+    let trimmed: String = value.chars().rev().take(max_chars).collect();
+    *value = trimmed.chars().rev().collect();
+}
+
+fn parse_duration_secs(stderr: &str) -> Option<f64> {
+    let start = stderr.find("Duration: ")? + "Duration: ".len();
+    let token = stderr[start..].split(',').next()?.trim();
+    parse_timestamp_secs(token)
+}
+
+fn parse_progress_secs(text: &str) -> Option<f64> {
+    if let Some((idx, _)) = text.rmatch_indices("out_time_ms=").next() {
+        let value = text[idx + "out_time_ms=".len()..]
+            .split_whitespace()
+            .next()?
+            .trim();
+        if let Ok(micros) = value.parse::<f64>() {
+            return Some(micros / 1_000_000.0);
+        }
+    }
+
+    if let Some((idx, _)) = text.rmatch_indices("out_time=").next() {
+        let value = text[idx + "out_time=".len()..]
+            .split_whitespace()
+            .next()?
+            .trim();
+        if let Some(seconds) = parse_timestamp_secs(value) {
+            return Some(seconds);
+        }
+    }
+
+    if let Some((idx, _)) = text.rmatch_indices("time=").next() {
+        let value = text[idx + "time=".len()..]
+            .split_whitespace()
+            .next()?
+            .trim();
+        if let Some(seconds) = parse_timestamp_secs(value) {
+            return Some(seconds);
+        }
+    }
+
+    None
+}
+
+fn parse_timestamp_secs(value: &str) -> Option<f64> {
+    let mut parts = value.split(':');
+    let hours = parts.next()?.parse::<f64>().ok()?;
+    let minutes = parts.next()?.parse::<f64>().ok()?;
+    let seconds = parts.next()?.parse::<f64>().ok()?;
+    Some(hours * 3600.0 + minutes * 60.0 + seconds)
 }
 
 // ─── 系统文件打开 ──────────────────────────────────────────────────────────────

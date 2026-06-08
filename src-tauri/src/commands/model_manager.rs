@@ -52,6 +52,20 @@ struct CdnSource {
 }
 
 impl CdnSource {
+    fn huggingface_repo(repo: &str, filename: &str) -> Self {
+        Self {
+            name: "huggingface",
+            url: format!("https://huggingface.co/{repo}/resolve/main/{filename}"),
+        }
+    }
+
+    fn hf_mirror_repo(repo: &str, filename: &str) -> Self {
+        Self {
+            name: "hf-mirror",
+            url: format!("https://hf-mirror.com/{repo}/resolve/main/{filename}"),
+        }
+    }
+
     /// 构建 HuggingFace 的 ggml-whisper.cpp 模型 URL。
     fn huggingface(filename: &str) -> Self {
         Self {
@@ -265,6 +279,33 @@ pub(crate) fn get_parakeet_dir(
     Ok(get_model_dir(app)?.join(model_id))
 }
 
+const NLLB_MODEL_ID: &str = "nllb-200-distilled-600M";
+const NLLB_REPO: &str = "facebook/nllb-200-distilled-600M";
+const NLLB_MODEL_FILES: [&str; 7] = [
+    "config.json",
+    "generation_config.json",
+    "pytorch_model.bin",
+    "sentencepiece.bpe.model",
+    "special_tokens_map.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+];
+
+fn is_nllb_model(model_id: &str) -> bool {
+    model_id == NLLB_MODEL_ID
+}
+
+fn get_nllb_dir(app: &AppHandle, model_id: &str) -> Result<std::path::PathBuf> {
+    Ok(get_model_dir(app)?.join(model_id))
+}
+
+fn nllb_model_ready(app: &AppHandle, model_id: &str) -> bool {
+    let Ok(dir) = get_nllb_dir(app, model_id) else {
+        return false;
+    };
+    NLLB_MODEL_FILES.iter().all(|file| dir.join(file).exists())
+}
+
 // ─── Tauri 命令 ────────────────────────────────────────────────────────────────
 
 /// **检测本地模型是否就绪**
@@ -273,7 +314,9 @@ pub(crate) fn get_parakeet_dir(
 /// - Parakeet：检查子目录内 4 个 ONNX 文件是否全部存在
 #[tauri::command]
 pub async fn check_model_status(app: AppHandle, model_id: String) -> Result<bool, String> {
-    if model_id.starts_with("parakeet") {
+    if is_nllb_model(&model_id) {
+        Ok(nllb_model_ready(&app, &model_id))
+    } else if model_id.starts_with("parakeet") {
         use super::sherpa_runner::parakeet_model_ready;
         Ok(parakeet_model_ready(&app, &model_id))
     } else {
@@ -299,10 +342,120 @@ pub async fn download_model(
     model_id: String,
     total_size: u64,
 ) -> Result<(), String> {
+    if is_nllb_model(&model_id) {
+        return download_nllb_files(&app, &model_id, total_size).await;
+    }
     if model_id.starts_with("parakeet") {
         return download_parakeet_files(&app, &model_id, total_size).await;
     }
     download_whisper_file(&app, &model_id, total_size).await
+}
+
+async fn download_nllb_files(
+    app: &AppHandle,
+    model_id: &str,
+    total_size: u64,
+) -> Result<(), String> {
+    let dest_dir = get_nllb_dir(app, model_id).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&dest_dir)
+        .await
+        .map_err(|e| format!("创建 NLLB 模型目录失败: {e}"))?;
+
+    let client = Client::builder()
+        .user_agent("qafone-tools/1.0 (model-downloader)")
+        .build()
+        .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
+
+    let hf_probe = CdnSource::huggingface_repo(NLLB_REPO, "pytorch_model.bin").url;
+    let mirror_probe = CdnSource::hf_mirror_repo(NLLB_REPO, "pytorch_model.bin").url;
+    let (hf_bps, mirror_bps) = tokio::join!(
+        measure_throughput_bps(&client, &hf_probe),
+        measure_throughput_bps(&client, &mirror_probe),
+    );
+    let use_mirror = mirror_bps > hf_bps;
+    let chosen_cdn_label = if use_mirror { "hf-mirror" } else { "huggingface" };
+
+    let est_sizes: [u64; 7] = [
+        5_000,
+        5_000,
+        (total_size as f64 * 0.985) as u64,
+        4_900_000,
+        2_000,
+        17_000_000,
+        1_000_000,
+    ];
+
+    let mut global_downloaded: u64 = 0;
+    let download_start = Instant::now();
+
+    for (file_name, &est_size) in NLLB_MODEL_FILES.iter().zip(est_sizes.iter()) {
+        let cdn = if use_mirror {
+            CdnSource::hf_mirror_repo(NLLB_REPO, file_name)
+        } else {
+            CdnSource::huggingface_repo(NLLB_REPO, file_name)
+        };
+        let cdn_name = cdn.name.to_owned();
+        tracing::info!("NLLB: downloading {file_name} from {cdn_name}");
+
+        let response = client
+            .get(&cdn.url)
+            .send()
+            .await
+            .map_err(|e| format!("请求 {file_name} 失败: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("下载 {file_name} 服务器返回错误: {e}"))?;
+
+        let file_total = response.content_length().unwrap_or(est_size);
+        let dest_path = dest_dir.join(file_name);
+        let mut out_file = fs::File::create(&dest_path)
+            .await
+            .map_err(|e| format!("创建文件 {dest_path:?} 失败: {e}"))?;
+        let mut stream = response.bytes_stream();
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.map_err(|e| format!("读取 {file_name} 数据流失败: {e}"))?;
+            out_file
+                .write_all(&chunk)
+                .await
+                .map_err(|e| format!("写入 {file_name} 失败: {e}"))?;
+
+            global_downloaded += chunk.len() as u64;
+            let elapsed = download_start.elapsed().as_secs_f64().max(f64::EPSILON);
+            let progress_total = total_size.max(file_total);
+            let _ = app.emit(
+                "model-download-progress",
+                DownloadProgressPayload {
+                    model_id: model_id.to_string(),
+                    downloaded: global_downloaded.min(progress_total),
+                    total: progress_total,
+                    percentage: (global_downloaded as f64 / progress_total as f64 * 100.0)
+                        .min(100.0),
+                    speed_bps: global_downloaded as f64 / elapsed,
+                    cdn_source: cdn_name.clone(),
+                },
+            );
+        }
+
+        out_file
+            .flush()
+            .await
+            .map_err(|e| format!("刷新 {file_name} 缓冲区失败: {e}"))?;
+    }
+
+    let final_elapsed = download_start.elapsed().as_secs_f64().max(f64::EPSILON);
+    let _ = app.emit(
+        "model-download-progress",
+        DownloadProgressPayload {
+            model_id: model_id.to_string(),
+            downloaded: total_size,
+            total: total_size,
+            percentage: 100.0,
+            speed_bps: global_downloaded as f64 / final_elapsed,
+            cdn_source: chosen_cdn_label.to_string(),
+        },
+    );
+
+    Ok(())
 }
 
 // ─── Parakeet multi-file download ────────────────────────────────────────────
@@ -513,7 +666,15 @@ async fn download_whisper_file(
 /// - Parakeet：删除 `<model_id>/` 整个子目录（幂等）。
 #[tauri::command]
 pub async fn delete_model(app: AppHandle, model_id: String) -> Result<(), String> {
-    if model_id.starts_with("parakeet") {
+    if is_nllb_model(&model_id) {
+        let dir = get_nllb_dir(&app, &model_id).map_err(|e| e.to_string())?;
+        if dir.exists() {
+            fs::remove_dir_all(&dir)
+                .await
+                .map_err(|e| format!("删除 NLLB 模型目录失败: {e}"))?;
+            tracing::info!("已删除 NLLB 模型目录: {:?}", dir);
+        }
+    } else if model_id.starts_with("parakeet") {
         let dir = get_parakeet_dir(&app, &model_id).map_err(|e| e.to_string())?;
         if dir.exists() {
             fs::remove_dir_all(&dir)

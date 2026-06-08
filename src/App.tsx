@@ -17,9 +17,11 @@ import FFmpegCodeGeneratorPage from '@/pages/encoding/FFmpegCodeGenerator';
 import WelcomePage from '@/pages/Welcome';
 import PreprocessingPage from '@/pages/Preprocessing';
 import { AsrTaskProvider } from '@/contexts/AsrTaskContext';
+import { UpdateProvider } from '@/contexts/UpdateContext';
 
 export default function App() {
   return (
+    <UpdateProvider>
     <AsrTaskProvider>
     <BrowserRouter>
       <Routes>
@@ -51,5 +53,6 @@ export default function App() {
       </Routes>
     </BrowserRouter>
     </AsrTaskProvider>
+    </UpdateProvider>
   );
 }

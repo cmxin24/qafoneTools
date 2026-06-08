@@ -2,6 +2,7 @@ import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { useI18n } from '@/i18n';
 import { SettingsDialog } from '@/components/SettingsDialog';
 import { cn } from '@/components/ui/utils';
+import { useUpdate } from '@/contexts/UpdateContext';
 import {
   Languages,
   Clock,
@@ -26,6 +27,7 @@ export function TopNav() {
   const { t } = useI18n();
   const location = useLocation();
   const navigate = useNavigate();
+  const { updateInfo } = useUpdate();
 
   const currentStepIndex = workflowSteps.findIndex((s) => location.pathname.startsWith(s.path));
 
@@ -78,7 +80,15 @@ export function TopNav() {
 
       {/* Settings */}
       <div className="flex items-center gap-2 min-w-[160px] justify-end">
-        <SettingsDialog />
+        <div className="relative">
+          {updateInfo?.has_update && (
+            <span
+              className="absolute -top-0.5 -right-0.5 z-10 h-2 w-2 rounded-full bg-red-500 ring-2 ring-background"
+              aria-label="Update available"
+            />
+          )}
+          <SettingsDialog />
+        </div>
       </div>
     </header>
   );
