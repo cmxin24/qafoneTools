@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useI18n } from '@/i18n';
 import { Button } from '@/components/ui/button';
@@ -24,24 +24,26 @@ import {
   AlertCircle,
   Wifi,
   Package,
-  Crop,
   Gauge,
   FolderInput,
+  Pause,
+  Play,
+  Square,
+  Copy,
+  Check,
 } from 'lucide-react';
 
 // ─── 分辨率预设 ─────────────────────────────────────────────────────────────────
 interface ResolutionPreset {
   label: string;
   height: number;
-  /** 参考 16:9 宽度（用于 UI 提示）*/
-  refWidth: number;
 }
 
 const RESOLUTION_PRESETS: ResolutionPreset[] = [
-  { label: '360p', height: 360, refWidth: 640 },
-  { label: '480p', height: 480, refWidth: 854 },
-  { label: '540p', height: 540, refWidth: 960 },   // 默认
-  { label: '720p', height: 720, refWidth: 1280 },
+  { label: '360p', height: 360 },
+  { label: '480p', height: 480 },
+  { label: '540p', height: 540 },   // 默认
+  { label: '720p', height: 720 },
 ];
 
 // ─── Tauri 桥接 ──────────────────────────────────────────────────────────────
@@ -58,7 +60,7 @@ interface FfmpegDownloadPayload {
 
 /** 视频压制进度事件 payload（对应 Rust VideoCompressProgressPayload） */
 interface CompressProgressPayload {
-  /** 'crop_detect' | 'encoding' */
+  /** 'preparing' | 'encoding' | 'done' | 'canceled' | 'error' */
   phase: string;
   /** 当前阶段进度百分比 0–100 */
   progress_pct: number;
@@ -80,11 +82,33 @@ async function tauriCompressVideo(
   inputPath: string,
   outputPath: string,
   targetHeight: number,
-  autoCrop: boolean,
 ): Promise<string> {
   if (!isTauri()) return '';
   const { invoke } = await import('@tauri-apps/api/core');
-  return invoke<string>('compress_video', { inputPath, outputPath, targetHeight, autoCrop });
+  return invoke<string>('compress_video', { inputPath, outputPath, targetHeight });
+}
+
+async function tauriPauseVideoCompression(): Promise<void> {
+  if (!isTauri()) return;
+  const { invoke } = await import('@tauri-apps/api/core');
+  await invoke('pause_video_compression');
+}
+
+async function tauriResumeVideoCompression(): Promise<void> {
+  if (!isTauri()) return;
+  const { invoke } = await import('@tauri-apps/api/core');
+  await invoke('resume_video_compression');
+}
+
+async function tauriCancelVideoCompression(): Promise<void> {
+  if (!isTauri()) return;
+  const { invoke } = await import('@tauri-apps/api/core');
+  await invoke('cancel_video_compression');
+}
+
+async function tauriGetVideoResolution(path: string): Promise<VideoResolution> {
+  const { invoke } = await import('@tauri-apps/api/core');
+  return invoke<VideoResolution>('get_video_resolution', { path });
 }
 
 /** 通过 Tauri dialog 打开视频文件选择器，返回文件路径和名称 */
@@ -102,17 +126,15 @@ async function pickVideoFile(): Promise<{ path: string; name: string } | null> {
   return null;
 }
 
-/** 计算默认输出路径：相同目录，文件名加 _小版本 后缀 */
+/** 计算默认输出路径：相同目录，文件名加 _小版本 后缀，固定输出 MP4 */
 function defaultOutputPath(inputPath: string): string {
   const normalized = inputPath.replace(/\\/g, '/');
   const lastSlash = normalized.lastIndexOf('/');
   const filename = lastSlash >= 0 ? normalized.slice(lastSlash + 1) : normalized;
   const dir = lastSlash >= 0 ? normalized.slice(0, lastSlash + 1) : '';
   const lastDot = filename.lastIndexOf('.');
-  if (lastDot > 0) {
-    return dir + filename.slice(0, lastDot) + '_小版本' + filename.slice(lastDot);
-  }
-  return dir + filename + '_小版本';
+  const stem = lastDot > 0 ? filename.slice(0, lastDot) : filename;
+  return `${dir}${stem}_小版本.mp4`;
 }
 
 // ─── 工具函数 ─────────────────────────────────────────────────────────────────
@@ -127,6 +149,82 @@ function formatSpeed(bps: number): string {
   return `${formatBytes(bps)}/s`;
 }
 
+function quoteCliArg(value: string): string {
+  return `"${value.replace(/"/g, '\\"')}"`;
+}
+
+function ensureMp4OutputPath(path: string): string {
+  const trimmed = path.trim();
+  if (!trimmed) return '';
+  const normalized = trimmed.replace(/\\/g, '/');
+  const lastSlash = normalized.lastIndexOf('/');
+  const filename = lastSlash >= 0 ? normalized.slice(lastSlash + 1) : normalized;
+  const dir = lastSlash >= 0 ? normalized.slice(0, lastSlash + 1) : '';
+  const lastDot = filename.lastIndexOf('.');
+  if (lastDot > 0) return `${dir}${filename.slice(0, lastDot)}.mp4`;
+  return `${dir}${filename}.mp4`;
+}
+
+const X264_OPTS = [
+  'ref=4',
+  'bframes=3',
+  'me=umh',
+  'keyint=600',
+  'min-keyint=1',
+  'deblock=1,1',
+  'scenecut=60',
+  'qcomp=0.5',
+  'psy-rd=0.3,0',
+  'aq-mode=2',
+  'aq-strength=0.8',
+].join(':');
+
+function buildCompactVideoCommand(inputPath: string, outputPath: string, targetHeight: number): string {
+  return [
+    'ffmpeg',
+    '-y',
+    '-i', quoteCliArg(inputPath),
+    '-progress', 'pipe:2',
+    '-nostats',
+    '-vf', quoteCliArg(`scale=-2:${targetHeight}`),
+    '-c:v', 'libx264',
+    '-crf', '22',
+    '-profile:v', 'high',
+    '-preset', 'slow',
+    '-x264opts', quoteCliArg(X264_OPTS),
+    '-c:a', 'aac',
+    '-b:a', '256k',
+    '-ac', '2',
+    '-movflags', '+faststart',
+    quoteCliArg(outputPath),
+  ].join(' ');
+}
+
+function estimateScaledResolution(source: VideoResolution, targetHeight: number): VideoResolution {
+  const rawWidth = (source.width / source.height) * targetHeight;
+  return {
+    width: Math.max(2, Math.round(rawWidth / 2) * 2),
+    height: targetHeight,
+  };
+}
+
+function probeBrowserVideoResolution(file: File): Promise<VideoResolution> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const video = document.createElement('video');
+    video.preload = 'metadata';
+    video.onloadedmetadata = () => {
+      URL.revokeObjectURL(url);
+      resolve({ width: video.videoWidth, height: video.videoHeight });
+    };
+    video.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('Unable to read video metadata'));
+    };
+    video.src = url;
+  });
+}
+
 // ─── 组件类型 ─────────────────────────────────────────────────────────────────
 type FfmpegStatus = 'checking' | 'available' | 'not-found';
 
@@ -139,7 +237,7 @@ interface DownloadState {
   totalBytes: number;
 }
 
-type CompressPhase = 'idle' | 'crop_detect' | 'encoding' | 'done' | 'error';
+type CompressPhase = 'idle' | 'preparing' | 'encoding' | 'done' | 'error';
 
 const INITIAL_DOWNLOAD: DownloadState = {
   phase: 'idle',
@@ -155,6 +253,31 @@ interface DroppedFile {
   size: number;
   /** 仅在 Tauri 环境下有值，用于传给后端 */
   path?: string;
+  /** 仅在浏览器 dev 环境下用于读取视频元数据 */
+  file?: File;
+}
+
+interface VideoResolution {
+  width: number;
+  height: number;
+}
+
+type VideoResolutionStatus = 'idle' | 'loading' | 'done' | 'unavailable' | 'error';
+
+function CopyButton({ text, label, copiedLabel }: { text: string; label: string; copiedLabel: string }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = useCallback(async () => {
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }, [text]);
+
+  return (
+    <Button variant="outline" size="sm" onClick={handleCopy} disabled={!text}>
+      {copied ? <Check className="mr-2 h-3.5 w-3.5 text-green-500" /> : <Copy className="mr-2 h-3.5 w-3.5" />}
+      {copied ? copiedLabel : label}
+    </Button>
+  );
 }
 
 // ─── 主组件 ───────────────────────────────────────────────────────────────────
@@ -169,6 +292,9 @@ export default function CompactVideoPage() {
   const [droppedFile, setDroppedFile] = useState<DroppedFile | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [videoResolution, setVideoResolution] = useState<VideoResolution | null>(null);
+  const [videoResolutionStatus, setVideoResolutionStatus] = useState<VideoResolutionStatus>('idle');
+  const [videoResolutionError, setVideoResolutionError] = useState<string | null>(null);
 
   // ── FFmpeg 状态 ───────────────────────────────────────────────────────────
   const [ffmpegStatus, setFfmpegStatus] = useState<FfmpegStatus>('checking');
@@ -176,12 +302,16 @@ export default function CompactVideoPage() {
 
   // ── 输出设置 ──────────────────────────────────────────────────────────────
   const [targetHeight, setTargetHeight] = useState(540);
-  const [autoCrop, setAutoCrop] = useState(true);
 
   // ── 压制状态 ──────────────────────────────────────────────────────────────
   const [compressPhase, setCompressPhase] = useState<CompressPhase>('idle');
   const [compressProgress, setCompressProgress] = useState(0);
-  const [outputPath, setOutputPath] = useState<string | null>(null);  const [compressError, setCompressError] = useState<string | null>(null);
+  const [isPaused, setIsPaused] = useState(false);
+  const [isCanceling, setIsCanceling] = useState(false);
+  const [outputPath, setOutputPath] = useState<string | null>(null);
+  const [compressError, setCompressError] = useState<string | null>(null);
+  const pauseRef = useRef(false);
+  const cancelRef = useRef(false);
 
   // ── 自定义输出路径 ───────────────────────────────────────────
   const [customOutputPath, setCustomOutputPath] = useState('');
@@ -189,21 +319,87 @@ export default function CompactVideoPage() {
   const selectedPreset = RESOLUTION_PRESETS.find((p) => p.height === targetHeight)!;
   const isDownloading =
     ffmpegDownload.phase === 'speed-testing' || ffmpegDownload.phase === 'downloading';
-  const isCompressing = compressPhase === 'crop_detect' || compressPhase === 'encoding';
-  // ── 文件变更时自动更新输出路径 ──────────────
+  const isCompressing = compressPhase === 'preparing' || compressPhase === 'encoding';
+  const pendingCommand = useMemo(() => {
+    if (!droppedFile) return '';
+    const inputPath = droppedFile.path ?? droppedFile.name;
+    const nextOutputPath = ensureMp4OutputPath(customOutputPath || defaultOutputPath(inputPath));
+    return buildCompactVideoCommand(inputPath, nextOutputPath, targetHeight);
+  }, [droppedFile, customOutputPath, targetHeight]);
+  const estimatedOutputResolution = useMemo(() => {
+    if (!videoResolution) return null;
+    return estimateScaledResolution(videoResolution, targetHeight);
+  }, [videoResolution, targetHeight]);
+  const isCompressingRef = useRef(false);
+  useEffect(() => { isCompressingRef.current = isCompressing; }, [isCompressing]);
+
+  const prepareResolutionProbe = useCallback(() => {
+    setVideoResolution(null);
+    setVideoResolutionError(null);
+    setVideoResolutionStatus('loading');
+  }, []);
+
+  // ── 导入视频后读取当前分辨率 ──────────────────────────────────────────────
   useEffect(() => {
-    if (droppedFile?.path) {
-      setCustomOutputPath(defaultOutputPath(droppedFile.path ?? droppedFile.name));
-    } else {
-      setCustomOutputPath('');
+    let canceled = false;
+
+    if (!droppedFile) {
+      return;
     }
-  }, [droppedFile?.path]);
+
+    if (droppedFile.file) {
+      probeBrowserVideoResolution(droppedFile.file)
+        .then((res) => {
+          if (canceled) return;
+          setVideoResolution(res);
+          setVideoResolutionStatus('done');
+        })
+        .catch((err) => {
+          if (canceled) return;
+          setVideoResolutionError(String(err));
+          setVideoResolutionStatus('error');
+        });
+      return () => { canceled = true; };
+    }
+
+    if (!droppedFile.path) {
+      window.setTimeout(() => {
+        if (!canceled) setVideoResolutionStatus('unavailable');
+      }, 0);
+      return;
+    }
+
+    if (ffmpegStatus === 'checking') {
+      return;
+    }
+
+    if (ffmpegStatus !== 'available') {
+      window.setTimeout(() => {
+        if (!canceled) setVideoResolutionStatus('unavailable');
+      }, 0);
+      return;
+    }
+
+    tauriGetVideoResolution(droppedFile.path)
+      .then((res) => {
+        if (canceled) return;
+        setVideoResolution(res);
+        setVideoResolutionStatus('done');
+      })
+      .catch((err) => {
+        if (canceled) return;
+        setVideoResolutionError(String(err));
+        setVideoResolutionStatus('error');
+      });
+
+    return () => { canceled = true; };
+  }, [droppedFile, ffmpegStatus]);
   // ── 挂载时检测 FFmpeg ──────────────────────────────────────────────────────
   useEffect(() => {
     tauriCheckFfmpegStatus().then((found) => {
       setFfmpegStatus(found ? 'available' : 'not-found');
     });
-  }, []);
+  }, [prepareResolutionProbe]);
   // ── Tauri 原生拖放事件 ───────────────────────────────────────
   useEffect(() => {
     if (!isTauri()) return;
@@ -219,12 +415,17 @@ export default function CompactVideoPage() {
         } else if (type === 'leave') {
           setIsDragging(false);
         } else if (type === 'drop' && 'paths' in event.payload) {
+          if (isCompressingRef.current) return;
           setIsDragging(false);
           const path = event.payload.paths[0];
           if (path) {
             const name = path.replace(/\\/g, '/').split('/').pop() ?? path;
+            prepareResolutionProbe();
             setDroppedFile({ name, size: 0, path });
+            setCustomOutputPath(defaultOutputPath(path));
             setCompressPhase('idle');
+            setIsPaused(false);
+            setIsCanceling(false);
             setOutputPath(null);
             setCompressError(null);
             // Fetch actual file size from Rust
@@ -238,7 +439,7 @@ export default function CompactVideoPage() {
       });
     })();
     return () => { unlisten?.(); };
-  }, []);
+  }, [prepareResolutionProbe]);
   // ── 监听 FFmpeg 下载进度事件 ────────────────────────────────────────────────
   useEffect(() => {
     if (!isTauri()) return;
@@ -271,9 +472,18 @@ export default function CompactVideoPage() {
       const { listen } = await import('@tauri-apps/api/event');
       unlisten = await listen<CompressProgressPayload>('video-compress-progress', (event) => {
         const p = event.payload;
-        setCompressPhase(p.phase as CompressPhase);
         setCompressProgress(p.progress_pct);
-        if (p.phase === 'done') setCompressPhase('done');
+        if (p.phase === 'done') {
+          setIsPaused(false);
+          setIsCanceling(false);
+          setCompressPhase('done');
+        } else if (p.phase === 'canceled') {
+          setIsPaused(false);
+          setIsCanceling(false);
+          setCompressPhase('idle');
+        } else if (p.phase === 'preparing' || p.phase === 'encoding') {
+          setCompressPhase(p.phase);
+        }
       });
     })();
     return () => { unlisten?.(); };
@@ -315,41 +525,121 @@ export default function CompactVideoPage() {
   // ── 开始压制 ────────────────────────────────────────────────────────────────
   const handleCompress = useCallback(async () => {
     if (!droppedFile || ffmpegStatus !== 'available') return;
-    setCompressPhase('crop_detect');
+    setCompressPhase('preparing');
     setCompressProgress(0);
+    setIsPaused(false);
+    setIsCanceling(false);
+    pauseRef.current = false;
+    cancelRef.current = false;
     setOutputPath(null);
+    setCompressError(null);
 
     if (isTauri()) {
       try {
-        const out = await tauriCompressVideo(droppedFile.path ?? '', customOutputPath || defaultOutputPath(droppedFile.path ?? droppedFile.name), targetHeight, autoCrop);
+        const out = await tauriCompressVideo(
+          droppedFile.path ?? '',
+          ensureMp4OutputPath(customOutputPath || defaultOutputPath(droppedFile.path ?? droppedFile.name)),
+          targetHeight,
+        );
         setOutputPath(out);
         setCompressPhase('done');
       } catch (err) {
-        console.error('Compression failed:', err);
-        setCompressError(String(err));
-        setCompressPhase('error');
+        if (cancelRef.current || String(err).includes('压制已取消')) {
+          setCompressPhase('idle');
+          setCompressError(null);
+        } else {
+          console.error('Compression failed:', err);
+          setCompressError(String(err));
+          setCompressPhase('error');
+        }
+      } finally {
+        setIsPaused(false);
+        setIsCanceling(false);
+        pauseRef.current = false;
+        cancelRef.current = false;
       }
     } else {
-      // 浏览器 dev mock：模拟检测黑边 + 编码两阶段
-      await new Promise((r) => setTimeout(r, 800));
+      // 浏览器 dev mock：模拟读取信息 + 编码进度
+      await new Promise((r) => setTimeout(r, 500));
+      if (cancelRef.current) {
+        setCompressPhase('idle');
+        return;
+      }
       setCompressPhase('encoding');
       const STEPS = 40;
       for (let i = 1; i <= STEPS; i++) {
         await new Promise((r) => setTimeout(r, 120));
+        while (pauseRef.current && !cancelRef.current) {
+          await new Promise((r) => setTimeout(r, 120));
+        }
+        if (cancelRef.current) {
+          setCompressPhase('idle');
+          setIsPaused(false);
+          setIsCanceling(false);
+          return;
+        }
         setCompressProgress((i / STEPS) * 100);
       }
-      setOutputPath(customOutputPath || '/mock/output/video_小版本.mp4');
+      setOutputPath(ensureMp4OutputPath(customOutputPath || '/mock/output/video_小版本.mp4'));
       setCompressPhase('done');
+      setIsPaused(false);
+      setIsCanceling(false);
     }
-  }, [droppedFile, ffmpegStatus, targetHeight, autoCrop, customOutputPath]);
+  }, [droppedFile, ffmpegStatus, targetHeight, customOutputPath]);
+
+  const handlePause = useCallback(async () => {
+    if (!isCompressing || isPaused || isCanceling) return;
+    try {
+      if (isTauri()) {
+        await tauriPauseVideoCompression();
+      }
+      pauseRef.current = true;
+      setIsPaused(true);
+    } catch (err) {
+      console.error('Pause compression failed:', err);
+    }
+  }, [isCompressing, isPaused, isCanceling]);
+
+  const handleResume = useCallback(async () => {
+    if (!isCompressing || !isPaused || isCanceling) return;
+    try {
+      if (isTauri()) {
+        await tauriResumeVideoCompression();
+      }
+      pauseRef.current = false;
+      setIsPaused(false);
+    } catch (err) {
+      console.error('Resume compression failed:', err);
+    }
+  }, [isCompressing, isPaused, isCanceling]);
+
+  const handleCancelCompression = useCallback(async () => {
+    if (!isCompressing || isCanceling) return;
+    cancelRef.current = true;
+    pauseRef.current = false;
+    setIsPaused(false);
+    setIsCanceling(true);
+    try {
+      if (isTauri()) {
+        await tauriCancelVideoCompression();
+      } else {
+        setCompressPhase('idle');
+        setIsCanceling(false);
+      }
+    } catch (err) {
+      console.error('Cancel compression failed:', err);
+      setIsCanceling(false);
+    }
+  }, [isCompressing, isCanceling]);
 
   // ── 文件拖拽 ────────────────────────────────────────────────────────────────
   // 非 Tauri 环境（浏览器 dev）才使用 HTML DnD
   const handleDragOver = useCallback((e: React.DragEvent) => {
     if (isTauri()) return;
     e.preventDefault();
+    if (isCompressing) return;
     setIsDragging(true);
-  }, []);
+  }, [isCompressing]);
   const handleDragLeave = useCallback(() => {
     if (isTauri()) return;
     setIsDragging(false);
@@ -358,23 +648,32 @@ export default function CompactVideoPage() {
     if (isTauri()) return;
     e.preventDefault();
     setIsDragging(false);
+    if (isCompressing) return;
     const file = e.dataTransfer.files[0];
     if (file) {
-      setDroppedFile({ name: file.name, size: file.size });
+      prepareResolutionProbe();
+      setDroppedFile({ name: file.name, size: file.size, file });
+      setCustomOutputPath(defaultOutputPath(file.name));
       setCompressPhase('idle');
+      setIsPaused(false);
+      setIsCanceling(false);
       setOutputPath(null);
       setCompressError(null);
     }
-  }, []);
+  }, [isCompressing, prepareResolutionProbe]);
 
   // 点击浏览——Tauri 下用 dialog，浏览器用 file input
   const handleBrowse = useCallback(async () => {
-    if (droppedFile) return;
+    if (droppedFile || isCompressing) return;
     if (isTauri()) {
       const picked = await pickVideoFile();
       if (picked) {
+        prepareResolutionProbe();
         setDroppedFile({ name: picked.name, size: 0, path: picked.path });
+        setCustomOutputPath(defaultOutputPath(picked.path));
         setCompressPhase('idle');
+        setIsPaused(false);
+        setIsCanceling(false);
         setOutputPath(null);
         setCompressError(null);
         // Fetch actual file size from Rust
@@ -386,25 +685,36 @@ export default function CompactVideoPage() {
     } else {
       fileInputRef.current?.click();
     }
-  }, [droppedFile]);
+  }, [droppedFile, isCompressing, prepareResolutionProbe]);
 
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    if (isCompressing) return;
     const file = e.target.files?.[0];
     if (file) {
-      setDroppedFile({ name: file.name, size: file.size });
+      prepareResolutionProbe();
+      setDroppedFile({ name: file.name, size: file.size, file });
+      setCustomOutputPath(defaultOutputPath(file.name));
       setCompressPhase('idle');
+      setIsPaused(false);
+      setIsCanceling(false);
       setOutputPath(null);
       setCompressError(null);
     }
-  }, []);
+  }, [isCompressing, prepareResolutionProbe]);
   const handleClearFile = useCallback(() => {
+    if (isCompressing) return;
     setDroppedFile(null);
     setCompressPhase('idle');
+    setIsPaused(false);
+    setIsCanceling(false);
     setOutputPath(null);
     setCompressError(null);
     setCustomOutputPath('');
+    setVideoResolution(null);
+    setVideoResolutionError(null);
+    setVideoResolutionStatus('idle');
     if (fileInputRef.current) fileInputRef.current.value = '';
-  }, []);
+  }, [isCompressing]);
 
   // ── 渲染操作按钮 ───────────────────────────────────────────────────────────
   const renderActionButton = () => {
@@ -489,24 +799,56 @@ export default function CompactVideoPage() {
       );
     }
 
+    if (isCompressing) {
+      const statusText = isCanceling
+        ? cv.cancelingCompress
+        : isPaused
+        ? cv.compressPaused
+        : compressPhase === 'preparing'
+        ? cv.preparingCompress
+        : cv.compressing;
+
+      return (
+        <div className="space-y-2">
+          <Button className="w-full gap-2" size="lg" disabled>
+            {isPaused
+              ? <Pause className="h-4 w-4" />
+              : <Loader2 className="h-4 w-4 animate-spin" />}
+            {statusText}
+          </Button>
+          <div className="grid grid-cols-2 gap-2">
+            <Button
+              className="gap-2"
+              variant="outline"
+              onClick={isPaused ? handleResume : handlePause}
+              disabled={isCanceling || compressPhase === 'preparing'}
+            >
+              {isPaused ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
+              {isPaused ? cv.resumeCompress : cv.pauseCompress}
+            </Button>
+            <Button
+              className="gap-2"
+              variant="destructive"
+              onClick={handleCancelCompression}
+              disabled={isCanceling}
+            >
+              <Square className="h-4 w-4" />
+              {cv.cancelCompress}
+            </Button>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <Button
         className="w-full gap-2"
         size="lg"
-        disabled={!droppedFile || isCompressing}
+        disabled={!droppedFile}
         onClick={handleCompress}
       >
-        {isCompressing ? (
-          <>
-            <Loader2 className="h-4 w-4 animate-spin" />
-            {compressPhase === 'crop_detect' ? cv.detectingCrop : cv.compressing}
-          </>
-        ) : (
-          <>
-            <Gauge className="h-4 w-4" />
-            {cv.startCompress}
-          </>
-        )}
+        <Gauge className="h-4 w-4" />
+        {cv.startCompress}
       </Button>
     );
   };
@@ -559,8 +901,30 @@ export default function CompactVideoPage() {
                   <CheckCircle2 className="h-10 w-10 text-green-500" />
                   <p className="font-medium text-foreground">{droppedFile.name}</p>
                   <p className="text-xs text-muted-foreground">{formatBytes(droppedFile.size)}</p>
+                  {videoResolutionStatus !== 'idle' && (
+                    <div className="flex flex-col items-center gap-1 text-xs text-muted-foreground">
+                      {videoResolutionStatus === 'done' && videoResolution && estimatedOutputResolution ? (
+                        <>
+                          <p>{cv.currentResolution}: {videoResolution.width} x {videoResolution.height}</p>
+                          <p className="text-blue-400">
+                            {cv.estimatedOutputResolution}: {estimatedOutputResolution.width} x {estimatedOutputResolution.height}
+                          </p>
+                        </>
+                      ) : (
+                        <p className="flex items-center gap-1.5">
+                          {videoResolutionStatus === 'loading' && <Loader2 className="h-3 w-3 animate-spin text-blue-400" />}
+                          {videoResolutionStatus === 'loading'
+                            ? cv.readingResolution
+                            : videoResolutionStatus === 'unavailable'
+                            ? cv.resolutionUnavailable
+                            : `${cv.resolutionReadFailed}${videoResolutionError ? `: ${videoResolutionError}` : ''}`}
+                        </p>
+                      )}
+                    </div>
+                  )}
                   <button
-                    className="mt-1 flex items-center gap-1 text-xs text-muted-foreground hover:text-destructive transition-colors"
+                    className="mt-1 flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-destructive disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:text-muted-foreground"
+                    disabled={isCompressing}
                     onClick={(e) => { e.stopPropagation(); handleClearFile(); }}
                   >
                     <X className="h-3 w-3" /> Remove
@@ -607,43 +971,12 @@ export default function CompactVideoPage() {
                 <SelectContent>
                   {RESOLUTION_PRESETS.map((p) => (
                     <SelectItem key={p.height} value={String(p.height)}>
-                      <div className="flex items-baseline gap-2">
-                        <span className="font-medium">{p.label}</span>
-                        <span className="text-xs text-muted-foreground">
-                          {locale === 'zh'
-                            ? `参考宽度 ${p.refWidth}px（16:9）`
-                            : `ref. ${p.refWidth}px wide (16:9)`}
-                        </span>
-                      </div>
+                      <span className="font-medium">{p.label}</span>
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
-              <p className="text-xs text-muted-foreground leading-relaxed">
-                {locale === 'zh'
-                  ? `输出高度锁定为 ${targetHeight}px，宽度依实际画面比例自动计算（去黑边后），确保为 2 的倍数。`
-                  : `Output height is fixed at ${targetHeight}px; width is calculated from the actual picture ratio (after crop), rounded to nearest 2.`}
-              </p>
             </div>
-
-            <Separator />
-
-            {/* 自动去黑边 */}
-            <label className="flex cursor-pointer items-start gap-3 rounded-md p-2 hover:bg-muted/50 transition-colors">
-              <div className="flex items-center gap-2 mt-0.5">
-                <Crop className="h-4 w-4 text-muted-foreground" />
-                <input
-                  type="checkbox"
-                  className="h-4 w-4 accent-blue-400 cursor-pointer"
-                  checked={autoCrop}
-                  onChange={(e) => setAutoCrop(e.target.checked)}
-                />
-              </div>
-              <div className="flex flex-col gap-0.5">
-                <span className="text-sm font-medium text-foreground">{cv.autoCrop}</span>
-                <span className="text-xs text-muted-foreground leading-snug">{cv.autoCropHint}</span>
-              </div>
-            </label>
 
             <Separator />
 
@@ -658,6 +991,7 @@ export default function CompactVideoPage() {
                   type="text"
                   value={customOutputPath}
                   onChange={(e) => setCustomOutputPath(e.target.value)}
+                  onBlur={() => setCustomOutputPath((path) => ensureMp4OutputPath(path))}
                   placeholder=""
                   className="flex-1 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-mono text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-primary/50"
                 />
@@ -676,7 +1010,7 @@ export default function CompactVideoPage() {
                           ? defaultOutputPath(droppedFile.path ?? droppedFile.name).replace(/\\/g, '/').split('/').pop() ?? ''
                           : '';
                         const filename = filenameFromPath || fallbackName;
-                        setCustomOutputPath(filename ? `${normalized}/${filename}` : normalized);
+                        setCustomOutputPath(filename ? ensureMp4OutputPath(`${normalized}/${filename}`) : normalized);
                       }
                     }}
                   >
@@ -767,11 +1101,15 @@ export default function CompactVideoPage() {
             {isCompressing && (
               <div className="space-y-2 animate-in fade-in duration-200">
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  {compressPhase === 'crop_detect'
-                    ? <Crop className="h-3 w-3 text-blue-400" />
-                    : <Gauge className="h-3 w-3 text-blue-400" />}
+                  <Gauge className="h-3 w-3 text-blue-400" />
                   <span>
-                    {compressPhase === 'crop_detect' ? cv.detectingCrop : cv.compressing}
+                    {isCanceling
+                      ? cv.cancelingCompress
+                      : isPaused
+                      ? cv.compressPaused
+                      : compressPhase === 'preparing'
+                      ? cv.preparingCompress
+                      : cv.compressing}
                   </span>
                   <span className="ml-auto tabular-nums text-blue-400">
                     {Math.round(compressProgress)}%
@@ -781,6 +1119,19 @@ export default function CompactVideoPage() {
               </div>
             )}
           </section>
+
+          {/* 即将执行的 FFmpeg 命令 */}
+          {droppedFile && pendingCommand && (
+            <section className="rounded-xl border border-border bg-card p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm font-semibold text-foreground">{cv.pendingCommand}</p>
+                <CopyButton text={pendingCommand} label={cv.copy} copiedLabel={cv.copied} />
+              </div>
+              <pre className="max-h-52 w-full select-all overflow-y-auto break-all whitespace-pre-wrap rounded-lg border border-border bg-background px-3 py-2 font-mono text-xs leading-relaxed text-foreground">
+                {pendingCommand}
+              </pre>
+            </section>
+          )}
 
           {/* 输出文件信息 */}
           {compressPhase === 'done' && outputPath && (
