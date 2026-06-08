@@ -54,6 +54,10 @@ interface ModelMeta {
   backend: 'whisper' | 'sherpa';
   /** ISO-639 language codes this model supports. Empty = all languages. */
   supportedLanguages?: string[];
+  /** Hide the model from active use while keeping a visible placeholder. */
+  disabled?: boolean;
+  disabledReasonEn?: string;
+  disabledReasonZh?: string;
 }
 
 const LLM_MODELS: ModelMeta[] = [
@@ -74,6 +78,9 @@ const LLM_MODELS: ModelMeta[] = [
     descEn: 'English only · Fast · INT8 ONNX · sherpa-onnx',
     descZh: '仅支持英语 · 速度快 · INT8 ONNX',
     backend: 'sherpa',
+    disabled: true,
+    disabledReasonEn: 'Pending update · please do not use',
+    disabledReasonZh: '待更新 · 暂请勿使用',
   },
 ];
 
@@ -352,6 +359,7 @@ export default function SubtitleExtractionPage() {
 
   // ── Derived ─────────────────────────────────────────────────────────────────
   const selectedModel = LLM_MODELS.find((m) => m.id === selectedModelId)!;
+  const selectedModelDisabled = selectedModel.disabled === true;
   const isDownloading =
     downloadState.phase === 'speed-testing' || downloadState.phase === 'downloading';
 
@@ -369,11 +377,15 @@ export default function SubtitleExtractionPage() {
   // ── Check model status when selection changes ───────────────────────────────
   useEffect(() => {
     setDownloadState(INITIAL_DOWNLOAD_STATE);
+    if (selectedModelDisabled) {
+      setModelStatus('not-found');
+      return;
+    }
     setModelStatus('checking');
     tauriCheckModelStatus(selectedModelId).then((found) =>
       setModelStatus(found ? 'available' : 'not-found')
     );
-  }, [selectedModelId]);
+  }, [selectedModelId, selectedModelDisabled]);
 
   // ── Subscribe to model download progress ────────────────────────────────────
   useEffect(() => {
@@ -454,6 +466,7 @@ export default function SubtitleExtractionPage() {
 
   // ── Download handler ────────────────────────────────────────────────────────
   const handleDownload = useCallback(async () => {
+    if (selectedModelDisabled) return;
     setDownloadState({ ...INITIAL_DOWNLOAD_STATE, phase: 'speed-testing' });
     if (isTauri()) {
       try {
@@ -485,7 +498,7 @@ export default function SubtitleExtractionPage() {
       }
       setTimeout(() => setModelStatus('available'), 600);
     }
-  }, [selectedModelId, selectedModel]);
+  }, [selectedModelId, selectedModel, selectedModelDisabled]);
 
   // ── Delete model ────────────────────────────────────────────────────────────
   const handleDeleteModel = useCallback(async () => {
@@ -550,12 +563,12 @@ export default function SubtitleExtractionPage() {
 
   // ── Real extraction ─────────────────────────────────────────────────────────
   const handleStartExtraction = useCallback(async () => {
-    if (!droppedFile || modelStatus !== 'available') return;
+    if (!droppedFile || selectedModelDisabled || modelStatus !== 'available') return;
     await ctxStartExtraction(
       { name: droppedFile.name, size: droppedFile.size, path: droppedFile.path, objectUrl: droppedFile.objectUrl },
       selectedModelId,
     );
-  }, [droppedFile, modelStatus, selectedModelId, ctxStartExtraction]);
+  }, [droppedFile, selectedModelDisabled, modelStatus, selectedModelId, ctxStartExtraction]);
 
   // Save to history whenever an extraction succeeds.
   useEffect(() => {
@@ -639,6 +652,25 @@ export default function SubtitleExtractionPage() {
       );
     }
 
+    if (selectedModelDisabled) {
+      return (
+        <div className="space-y-2">
+          <div className="flex items-start gap-2 rounded-lg bg-amber-500/10 border border-amber-500/20 px-3 py-2.5">
+            <AlertCircle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+            <span className="text-xs text-muted-foreground">
+              {locale === 'zh'
+                ? selectedModel.disabledReasonZh
+                : selectedModel.disabledReasonEn}
+            </span>
+          </div>
+          <Button className="w-full gap-2" size="lg" disabled>
+            <Scissors className="h-4 w-4" />
+            {locale === 'zh' ? '该模型暂不可用' : 'Model unavailable'}
+          </Button>
+        </div>
+      );
+    }
+
     if (modelStatus === 'checking') {
       return (
         <Button className="w-full gap-2" size="lg" disabled>
@@ -698,15 +730,6 @@ export default function SubtitleExtractionPage() {
 
     return (
       <div className="space-y-2">
-        {/* English-only reminder for Parakeet (sherpa backend) */}
-        {selectedModel.backend === 'sherpa' && (
-          <div className="flex items-start gap-2 rounded-lg bg-blue-500/10 border border-blue-500/20 px-3 py-2.5">
-            <AlertCircle className="h-4 w-4 text-blue-400 shrink-0 mt-0.5" />
-            <span className="text-xs text-muted-foreground">
-              Parakeet 仅支持英文音频，其他语言请选择 Whisper 模型。
-            </span>
-          </div>
-        )}
         <Button
           className="w-full gap-2"
           size="lg"
@@ -925,27 +948,47 @@ export default function SubtitleExtractionPage() {
                   <span className="font-medium text-sm leading-tight">{selectedModel.name}</span>
                   <span className="text-xs text-muted-foreground leading-tight">
                     {selectedModel.sizeLabel} · {locale === 'zh' ? selectedModel.descZh : selectedModel.descEn}
+                    {selectedModelDisabled && (
+                      <> · {locale === 'zh' ? selectedModel.disabledReasonZh : selectedModel.disabledReasonEn}</>
+                    )}
                   </span>
                 </div>
               </SelectTrigger>
               <SelectContent>
                 {LLM_MODELS.map((m) => (
-                  <SelectItem key={m.id} value={m.id} className="py-2">
+                  <SelectItem key={m.id} value={m.id} className="py-2" disabled={m.disabled}>
                     <div className="flex flex-col gap-0.5">
                       <div className="flex items-center gap-1.5">
                         <span className="font-medium">{m.name}</span>
                         {m.backend === 'sherpa' && (
                           <span className="inline-flex items-center rounded px-1 py-0.5 text-[10px] font-medium bg-blue-500/15 text-blue-400 border border-blue-500/20">EN</span>
                         )}
+                        {m.disabled && (
+                          <span className="inline-flex items-center rounded px-1 py-0.5 text-[10px] font-medium bg-amber-500/15 text-amber-400 border border-amber-500/20">
+                            {locale === 'zh' ? '待更新' : 'Pending'}
+                          </span>
+                        )}
                       </div>
                       <span className="text-xs text-muted-foreground">
                         {m.sizeLabel} · {locale === 'zh' ? m.descZh : m.descEn}
+                        {m.disabled && (
+                          <> · {locale === 'zh' ? m.disabledReasonZh : m.disabledReasonEn}</>
+                        )}
                       </span>
                     </div>
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
+
+            <div className="flex items-start gap-2 rounded-lg bg-amber-500/10 border border-amber-500/20 px-3 py-2.5">
+              <AlertCircle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+              <span className="text-xs text-muted-foreground leading-relaxed">
+                {locale === 'zh'
+                  ? 'NVIDIA Parakeet 支持尚不完善，入口已暂时关闭。请先使用 Whisper Large V3 Turbo 提取字幕。'
+                  : 'NVIDIA Parakeet support is still incomplete, so this entry is temporarily disabled. Please use Whisper Large V3 Turbo for subtitle extraction.'}
+              </span>
+            </div>
 
             {/* Model status badge */}
             <div className={cn(
